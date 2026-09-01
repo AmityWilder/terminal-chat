@@ -31,7 +31,10 @@ fn main() {
             match Message::read_from(socket) {
                 Err(e) => {
                     if e.kind() != io::ErrorKind::WouldBlock {
-                        eprintln!("failed to read message from client {addr}: {e}")
+                        eprintln!("failed to read message from client {addr}: {e}");
+                        eprintln!("forcing client {addr} disconnect.");
+                        clients.swap_remove(i);
+                        continue; // `i` now refers to a different client
                     }
                 }
 

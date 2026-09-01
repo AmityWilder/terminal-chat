@@ -51,11 +51,14 @@ pub struct Message {
 
 impl Message {
     pub fn write_to<W: Write>(&self, stream: &mut W) -> io::Result<()> {
+        stream.write_all(const { &[1] })?;
+        assert!(self.text.len() <= MAX_TEXT_BYTES, "invalid text length");
         stream.write_all(
             &TextByteCount::try_from(self.text.len())
                 .unwrap()
                 .to_le_bytes(),
         )?;
+        assert!(self.images.len() <= MAX_IMAGES, "invalid image count");
         stream.write_all(
             &ImageCount::try_from(self.images.len())
                 .unwrap()
@@ -81,22 +84,21 @@ impl Message {
                     .unwrap()
                     .to_le_bytes(),
             )?;
+
+            stream.write_all(image.alt_text.as_bytes())?;
             stream.write_all(&image.data)?;
         }
         Ok(())
     }
 
     pub fn read_from<R: Read>(stream: &mut R) -> io::Result<Option<Self>> {
-        let mut text_len = [0; _];
-        let n = stream.read(&mut text_len)?;
-        if n == 0 {
-            return Ok(None);
-        } else if n != text_len.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "failed to fill whole buffer",
-            ));
+        let mut buf = [0];
+        if stream.read(&mut buf)? == 1 {
+            println!("received: {buf:?}");
         }
+
+        let mut text_len = [0; _];
+        stream.read_exact(&mut text_len)?;
         let text_len = TextByteCount::from_le_bytes(text_len);
 
         let mut image_count = [0; _];
