@@ -2,7 +2,7 @@
 
 use std::{
     io::{self, Read, Write},
-    net::{Ipv4Addr, SocketAddr},
+    net::{Ipv4Addr, SocketAddr, TcpStream},
 };
 
 pub const ADDRESS: SocketAddr =
@@ -49,9 +49,11 @@ pub struct Message {
     pub images: Vec<Image>,
 }
 
+const START_OF_TEXT: u8 = 1;
+
 impl Message {
-    pub fn write_to<W: Write>(&self, stream: &mut W) -> io::Result<()> {
-        stream.write_all(const { &[1] })?;
+    pub fn write_to(&self, stream: &mut TcpStream) -> io::Result<()> {
+        stream.write_all(const { &[START_OF_TEXT] })?;
         assert!(self.text.len() <= MAX_TEXT_BYTES, "invalid text length");
         stream.write_all(
             &TextByteCount::try_from(self.text.len())
@@ -91,10 +93,13 @@ impl Message {
         Ok(())
     }
 
-    pub fn read_from<R: Read>(stream: &mut R) -> io::Result<Option<Self>> {
+    pub fn read_from(stream: &mut TcpStream) -> io::Result<Option<Self>> {
         let mut buf = [0];
         if stream.read(&mut buf)? == 1 {
-            println!("received: {buf:?}");
+            assert_eq!(buf, [START_OF_TEXT]);
+            stream.set_nonblocking(false)?;
+        } else {
+            return Ok(None);
         }
 
         let mut text_len = [0; _];
@@ -105,7 +110,7 @@ impl Message {
         stream.read_exact(&mut image_count)?;
         let image_count = ImageCount::from_le_bytes(image_count);
 
-        Ok(Some(Self {
+        let res = Self {
             text: {
                 let mut text = vec![0; text_len as usize];
                 stream.read_exact(&mut text)?;
@@ -131,6 +136,8 @@ impl Message {
             })
             .take(image_count as usize)
             .collect::<io::Result<Vec<_>>>()?,
-        }))
+        };
+        stream.set_nonblocking(true)?;
+        Ok(Some(res))
     }
 }
