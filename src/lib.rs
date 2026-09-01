@@ -49,9 +49,11 @@ pub struct Message {
     pub images: Vec<Image>,
 }
 
+const START_OF_TEXT: u8 = 1;
+
 impl Message {
     pub fn write_to<W: Write>(&self, stream: &mut W) -> io::Result<()> {
-        stream.write_all(const { &[1] })?;
+        stream.write_all(const { &[START_OF_TEXT] })?;
         assert!(self.text.len() <= MAX_TEXT_BYTES, "invalid text length");
         stream.write_all(
             &TextByteCount::try_from(self.text.len())
@@ -93,8 +95,10 @@ impl Message {
 
     pub fn read_from<R: Read>(stream: &mut R) -> io::Result<Option<Self>> {
         let mut buf = [0];
-        if stream.read(&mut buf)? == 1 {
-            println!("received: {buf:?}");
+        match stream.read(&mut buf)? {
+            0 => return Ok(None),
+            1 => assert_eq!(buf, [START_OF_TEXT], "expected Start Of Text"),
+            _ => unreachable!(),
         }
 
         let mut text_len = [0; _];
