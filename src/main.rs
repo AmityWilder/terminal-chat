@@ -3,7 +3,7 @@
 use std::{
     io::{self, Read, Write},
     net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
-    sync::{Arc, Mutex},
+    sync::Mutex,
     thread,
 };
 
@@ -159,6 +159,12 @@ impl Server {
 
                                 Ok(Some(msg)) => {
                                     println!("message from client {addr}:\n```\n{msg:?}\n```");
+                                    Message {
+                                        text: "acknowledged".to_string(),
+                                        images: Vec::new(),
+                                    }
+                                    .write_to(socket)
+                                    .expect("failed to send response to client");
                                 }
                             }
                             i += 1;
@@ -212,6 +218,11 @@ fn main() {
                         images: Vec::new(),
                     })
                     .expect("failed to send message");
+                match client.read_message() {
+                    Err(e) => panic!("failed to read message from server: {e}"),
+                    Ok(None) => println!("server responded without a message"),
+                    Ok(Some(msg)) => println!("message from server {ADDRESS}:\n```\n{msg:?}\n```"),
+                }
             })
             .expect("failed to spawn thread");
 
@@ -226,6 +237,11 @@ fn main() {
                         images: Vec::new(),
                     })
                     .expect("failed to send message");
+                match client.read_message() {
+                    Err(e) => panic!("failed to read message from server: {e}"),
+                    Ok(None) => println!("server responded without a message"),
+                    Ok(Some(msg)) => println!("message from server {ADDRESS}:\n```\n{msg:?}\n```"),
+                }
             })
             .expect("failed to spawn thread");
     });
