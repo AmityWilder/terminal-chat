@@ -1,3 +1,5 @@
+#![warn(clippy::undocumented_unsafe_blocks)]
+
 use std::net::TcpStream;
 use terminal_chat::{ADDRESS, Message};
 
