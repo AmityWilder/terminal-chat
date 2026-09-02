@@ -7,8 +7,9 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-pub const ADDRESS: SocketAddr =
-    SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
+pub const ADDRESS: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
+const START_OF_TEXT: u8 = 1;
+const START_OF_SVRM: u8 = 2;
 
 macro_rules! read_int {
     (($Int:ty) $stream:expr) => {{
@@ -21,7 +22,7 @@ macro_rules! read_int {
 
 macro_rules! read_vec {
     ([$len:expr] $stream:expr) => {{
-        let mut data = vec![0; $len];
+        let mut data = vec![Default::default(); $len];
         $stream.read_exact(&mut data).map(|()| data)
     }};
 }
@@ -99,6 +100,14 @@ pub struct Attachment {
 }
 
 portable_size! {
+    pub DestinationLen = u16;
+    pub MAX_DESTINATION_BYTES = 2048;
+}
+
+/// At most [`MAX_DESTINATION_BYTES`] bytes.
+type Destination = String;
+
+portable_size! {
     pub TextLen = u16;
     pub MAX_TEXT_BYTES = 2048;
 }
@@ -109,7 +118,9 @@ portable_size! {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
-pub struct Message {
+pub struct UserMessage {
+    pub destination: Destination,
+
     /// At most [`MAX_TEXT_BYTES`] bytes
     pub text: String,
 
@@ -117,16 +128,13 @@ pub struct Message {
     pub attachments: Vec<Attachment>,
 }
 
-const START_OF_TEXT: u8 = 1;
-
-impl Message {
-    pub fn write_to(&self, stream: &mut TcpStream) -> io::Result<()> {
-        // indicate an incoming message
-        stream.write_all(const { &[START_OF_TEXT] })?;
-
+impl UserMessage {
+    pub fn write_to<W: Write>(&self, mut stream: W) -> io::Result<()> {
         // write the message content
+        write_int!((DestinationLen) [..MAX_DESTINATION_BYTES] "destination too long" (self.destination.len()) -> stream)?;
         write_int!((TextLen) [..=MAX_TEXT_BYTES] "message too long" (self.text.len()) -> stream)?;
         write_int!((AttachmentCount) [..=MAX_ATTACHMENTS] "too many attachments" (self.attachments.len()) -> stream)?;
+        stream.write_all(self.destination.as_bytes())?;
         stream.write_all(self.text.as_bytes())?;
         for attachment in &self.attachments {
             write_int!((FilenameLen) [..=MAX_FILENAME_BYTES] "filename too long" (attachment.filename.len()) -> stream)?;
@@ -135,23 +143,15 @@ impl Message {
             stream.write_all(attachment.alt_text.as_bytes())?;
             stream.write_all(attachment.data.as_slice())?;
         }
-
         Ok(())
     }
 
-    pub fn read_from(stream: &mut TcpStream) -> io::Result<Option<Self>> {
-        let mut buf = [0];
-        // is a message incoming?
-        if stream.read(&mut buf)? == 0 {
-            return Ok(None);
-        }
-        assert_eq!(buf, [START_OF_TEXT]);
-
-        stream.set_nonblocking(false)?; // we want to block to read the rest of the message
-
+    pub fn read_from<R: Read>(mut stream: R) -> io::Result<Self> {
         // read the message content
+        let destination_len = read_int!((DestinationLen) stream)?;
         let text_len = read_int!((TextLen) stream)?;
         let attachment_count = read_int!((AttachmentCount) stream)?;
+        let destination = read_string!([destination_len as usize] stream)?;
         let text = read_string!([text_len as usize] stream)?;
         let attachments = std::iter::repeat_with(|| {
             let filename_len = read_int!((FilenameLen) stream)?;
@@ -169,10 +169,149 @@ impl Message {
         .take(attachment_count as usize)
         .collect::<io::Result<Vec<_>>>()?;
 
-        stream.set_nonblocking(true)?; // now that the message is finished being read, we can go nonblocking again
-
-        Ok(Some(Self { text, attachments }))
+        Ok(Self {
+            destination,
+            text,
+            attachments,
+        })
     }
+}
+
+portable_size! {
+    pub MemberCount = u8;
+    pub MAX_CHAT_MEMBERS = 256;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ServerMessage {
+    CreateChat {
+        destination: Destination,
+        members: Vec<SocketAddr>,
+    },
+}
+
+impl ServerMessage {
+    const CREATE_CHAT_VARIANT: u8 = 0;
+
+    pub fn write_to<W: Write>(&self, mut stream: W) -> io::Result<()> {
+        match self {
+            Self::CreateChat {
+                destination,
+                members,
+            } => {
+                stream.write_all(&[Self::CREATE_CHAT_VARIANT])?;
+                write_int!((DestinationLen) [..=MAX_DESTINATION_BYTES] "destination too long" (destination.len()) -> stream)?;
+                write_int!((MemberCount) [..=MAX_CHAT_MEMBERS] "too many members" (members.len()) -> stream)?;
+                stream.write_all(destination.as_bytes())?;
+                for member in members {
+                    let addr = member.to_string();
+                    write_int!((u8) [..=256] "address too long" (addr.len()) -> stream)?;
+                    stream.write_all(addr.as_bytes())?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn read_from<R: Read>(mut stream: R) -> io::Result<Self> {
+        match read_int!((u8) stream)? {
+            Self::CREATE_CHAT_VARIANT => {
+                let dst_len = read_int!((DestinationLen) stream)?;
+                let member_count = read_int!((MemberCount) stream)?;
+                Ok(Self::CreateChat {
+                    destination: read_string!([dst_len as usize] stream)?,
+                    members: std::iter::repeat_with(|| {
+                        let addr_len = read_int!((u8) stream)?;
+                        let addr = read_string!([addr_len as usize] stream)?;
+                        addr.parse().map_err(io::Error::other)
+                    })
+                    .take(member_count as usize)
+                    .collect::<io::Result<Vec<_>>>()?,
+                })
+            }
+
+            _ => Err(io::Error::other("unknown variant")),
+        }
+    }
+}
+
+struct TempBlockingTkn<'a>(&'a mut TcpStream);
+
+impl std::ops::Deref for TempBlockingTkn<'_> {
+    type Target = TcpStream;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
+impl std::ops::DerefMut for TempBlockingTkn<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0
+    }
+}
+
+impl Drop for TempBlockingTkn<'_> {
+    fn drop(&mut self) {
+        self.0
+            .set_nonblocking(true)
+            .expect("cannot set nonblocking");
+    }
+}
+
+impl<'a> TempBlockingTkn<'a> {
+    fn begin(stream: &'a mut TcpStream) -> io::Result<Self> {
+        stream.set_nonblocking(false)?;
+        Ok(Self(stream))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Message {
+    User(UserMessage),
+    Server(ServerMessage),
+}
+
+impl Message {
+    pub fn write_to(&self, stream: &mut TcpStream) -> io::Result<()> {
+        match self {
+            Self::User(msg) => {
+                // indicate an incoming message
+                stream.write_all(&[START_OF_TEXT])?;
+                msg.write_to(stream)
+            }
+            Self::Server(msg) => {
+                // indicate an incoming message
+                stream.write_all(&[START_OF_SVRM])?;
+                msg.write_to(stream)
+            }
+        }
+    }
+
+    pub fn read_from(stream: &mut TcpStream) -> io::Result<Option<Self>> {
+        let mut msg_type = 0;
+
+        // is a message incoming?
+        if stream.read(std::slice::from_mut(&mut msg_type))? == 0 {
+            return Ok(None); // no message
+        }
+
+        // block until the full message is read
+        let mut tkn = TempBlockingTkn::begin(stream)?;
+
+        Ok(Some(match msg_type {
+            START_OF_TEXT => Message::User(UserMessage::read_from(&mut *tkn)?),
+            START_OF_SVRM => Message::Server(ServerMessage::read_from(&mut *tkn)?),
+
+            _ => {
+                eprintln!(
+                    "unknown message type: {msg_type:?} ('{}')",
+                    char::from(msg_type)
+                );
+                return Err(io::Error::other("unexpected message type"));
+            }
+        }))
+    } // token goes out of scope and ends blocking
 }
 
 #[derive(Debug)]

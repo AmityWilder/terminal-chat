@@ -1,7 +1,28 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
-use std::{io, net::TcpListener, sync::mpsc};
-use terminal_chat::{ADDRESS, Message, StdinChannel};
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    io,
+    net::TcpListener,
+    sync::mpsc,
+};
+use terminal_chat::{ADDRESS, Message, ServerMessage, StdinChannel, UserMessage};
+
+macro_rules! response {
+    (($text:expr) -> ($addr:expr) via $socket:expr) => {{
+        let text = $text.to_string();
+        println!("responding to client with \"{text}\"");
+        if let Err(e) = Message::User(UserMessage {
+            destination: $addr.to_string(),
+            text,
+            attachments: Vec::new(),
+        })
+        .write_to($socket)
+        {
+            eprintln!("failed to send response to client: {e}");
+        }
+    }};
+}
 
 fn main() {
     let stdin = StdinChannel::new();
@@ -12,6 +33,7 @@ fn main() {
         .expect("cannot set nonblocking");
 
     let mut clients = Vec::new();
+    let mut chats = HashMap::new();
 
     println!("awaiting client connect...");
     loop {
@@ -48,9 +70,6 @@ fn main() {
                 Err(e) => {
                     if e.kind() != io::ErrorKind::WouldBlock {
                         eprintln!("failed to read message from client {addr}: {e}");
-                        eprintln!("forcing client {addr} disconnect.");
-                        clients.swap_remove(i);
-                        continue; // `i` now refers to a different client
                     }
                 }
 
@@ -60,15 +79,34 @@ fn main() {
                     continue; // `i` now refers to a different client
                 }
 
-                Ok(Some(msg)) => {
-                    println!("message from client {addr}:\n```\n{msg:?}\n```");
-                    Message {
-                        text: "acknowledged".to_string(),
-                        attachments: Vec::new(),
+                Ok(Some(msg)) => match msg {
+                    Message::User(umsg) => {
+                        println!("message from client {addr}:\n```\n{umsg:?}\n```");
+                        response!(("acknowledged") -> (addr) via socket);
                     }
-                    .write_to(socket)
-                    .expect("failed to send response to client");
-                }
+                    Message::Server(smsg) => {
+                        println!("instruction from client {addr}:\n```\n{smsg:?}\n```");
+                        match smsg {
+                            ServerMessage::CreateChat {
+                                destination,
+                                members,
+                            } => {
+                                println!("creating chat...");
+                                match chats.entry(destination) {
+                                    Entry::Occupied(_) => {
+                                        eprintln!("a chat with this name already exists");
+                                        response!(("failed: already exists") -> (addr) via socket);
+                                    }
+                                    Entry::Vacant(entry) => {
+                                        entry.insert(members);
+                                        println!("chat created");
+                                        response!(("success") -> (addr) via socket);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
             }
             i += 1;
         }
