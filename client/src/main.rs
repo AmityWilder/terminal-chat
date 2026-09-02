@@ -5,7 +5,7 @@ use terminal_chat::{ADDRESS, Message, ServerMessage, StdinChannel, UserMessage};
 
 fn display_message(msg: &UserMessage) {
     println!(
-        "\x1b[90mfrom \x1b[93m{}\x1b[90m in \x1b[93m{}\x1b[90m:\x1b[0m",
+        "\x1b[90mfrom \x1b[94m{}\x1b[90m in \x1b[94m{}\x1b[90m:\x1b[0m",
         msg.sender
             .map(|x| x.to_string())
             .unwrap_or("[null]".to_string()),

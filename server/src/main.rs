@@ -6,7 +6,7 @@ use std::{
     net::{SocketAddr, TcpListener, TcpStream},
     sync::mpsc,
 };
-use terminal_chat::{ADDRESS, Message, ServerMessage, StdinChannel};
+use terminal_chat::{ADDRESS, Message, MessageError, ServerMessage, StdinChannel};
 
 macro_rules! response {
     (($msg:expr) -> $socket:expr) => {{
@@ -22,6 +22,80 @@ macro_rules! response {
 struct Client {
     pub socket: TcpStream,
     pub addr: SocketAddr,
+}
+
+fn route_message(
+    clients: &mut [Client],
+    chats: &mut HashMap<String, BTreeSet<SocketAddr>>,
+    sender_index: usize,
+    msg: Message,
+) {
+    match msg {
+        Message::User(mut umsg) => {
+            response!((Message::Server(ServerMessage::Acknowledge)) -> &mut clients[sender_index].socket);
+            let sender = clients[sender_index].addr;
+            umsg.sender = Some(sender);
+            let destination = &umsg.destination;
+            match chats.get(destination) {
+                Some(members) => {
+                    let msg = Message::User(umsg);
+                    println!("distributing message:\n```\n{msg:?}\n```");
+                    for member in members.iter() {
+                        if *member == sender {
+                            continue; // dont echo back to original sender. they know what they wrote.
+                        }
+                        if let Some(recipient) =
+                            clients.iter_mut().find(|client| client.addr == *member)
+                        {
+                            if let Err(e) = msg.clone().write_to(&mut recipient.socket) {
+                                eprintln!("failed to send message to client `{member}`: {e}");
+                            } else {
+                                println!("sent message to client `{member}`")
+                            }
+                        } else {
+                            eprintln!("chat member `{member}` offline");
+                        }
+                    }
+                    response!((Message::Server(ServerMessage::Success)) -> &mut clients[sender_index].socket);
+                }
+                None => {
+                    eprintln!("chat `{destination}` does not exist");
+                    response!((Message::Server(ServerMessage::Error(MessageError::DstNexists))) -> &mut clients[sender_index].socket);
+                }
+            }
+        }
+
+        Message::Server(smsg) => {
+            println!(
+                "instruction from client {}:\n```\n{smsg:?}\n```",
+                clients[sender_index].addr
+            );
+            match smsg {
+                ServerMessage::Acknowledge => println!("acknowledged"),
+                ServerMessage::Success => println!("success"),
+                ServerMessage::Error(e) => eprintln!("error: {e}"),
+
+                ServerMessage::CreateChat {
+                    destination,
+                    mut members,
+                } => {
+                    println!("creating chat...");
+                    match chats.entry(destination) {
+                        Entry::Occupied(_) => {
+                            eprintln!("a chat with this name already exists");
+                            response!((Message::Server(ServerMessage::Error(MessageError::ChatTaken))) -> &mut clients[sender_index].socket);
+                        }
+                        Entry::Vacant(entry) => {
+                            members.insert(clients[sender_index].addr);
+                            entry.insert(members);
+                            println!("chat created");
+                            response!((Message::Server(ServerMessage::Success)) -> &mut clients[sender_index].socket);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn main() {
@@ -81,74 +155,7 @@ fn main() {
                     continue; // `i` now refers to a different client
                 }
 
-                Ok(Some(msg)) => match msg {
-                    Message::User(mut umsg) => {
-                        // response!((Message::Server(ServerMessage::Acknowledge)) -> &mut clients[i].socket);
-                        let sender = clients[i].addr;
-                        umsg.sender = Some(sender);
-                        println!("distributing message:\n```\n{umsg:?}\n```");
-                        match chats.get(&umsg.destination) {
-                            Some(members) => {
-                                for member in members.iter() {
-                                    if *member == sender {
-                                        continue;
-                                    }
-                                    if let Some(recipient) =
-                                        clients.iter_mut().find(|client| client.addr == *member)
-                                    {
-                                        if let Err(e) = Message::User(umsg.clone())
-                                            .write_to(&mut recipient.socket)
-                                        {
-                                            eprintln!(
-                                                "failed to send message to client `{member}`: {e}"
-                                            );
-                                        } else {
-                                            println!("sent message to client `{member}`")
-                                        }
-                                    } else {
-                                        eprintln!("chat member `{member}` offline");
-                                    }
-                                }
-                                response!((Message::Server(ServerMessage::Success)) -> &mut clients[i].socket);
-                            }
-                            None => {
-                                eprintln!("chat does not exist");
-                                response!((Message::Server(ServerMessage::Error("nonexistent".to_string()))) -> &mut clients[i].socket);
-                            }
-                        }
-                    }
-
-                    Message::Server(smsg) => {
-                        println!(
-                            "instruction from client {}:\n```\n{smsg:?}\n```",
-                            clients[i].addr
-                        );
-                        match smsg {
-                            ServerMessage::Acknowledge => println!("acknowledged"),
-                            ServerMessage::Success => println!("success"),
-                            ServerMessage::Error(e) => eprintln!("error: {e}"),
-
-                            ServerMessage::CreateChat {
-                                destination,
-                                mut members,
-                            } => {
-                                println!("creating chat...");
-                                match chats.entry(destination) {
-                                    Entry::Occupied(_) => {
-                                        eprintln!("a chat with this name already exists");
-                                        response!((Message::Server(ServerMessage::Error("taken".to_string()))) -> &mut clients[i].socket);
-                                    }
-                                    Entry::Vacant(entry) => {
-                                        members.insert(clients[i].addr);
-                                        entry.insert(members);
-                                        println!("chat created");
-                                        response!((Message::Server(ServerMessage::Success)) -> &mut clients[i].socket);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                },
+                Ok(Some(msg)) => route_message(&mut clients, &mut chats, i, msg),
             }
             i += 1;
         }

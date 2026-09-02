@@ -207,11 +207,34 @@ portable_size! {
     pub MAX_CHAT_MEMBERS = 256;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MessageError {
+    DstNexists,
+    ChatTaken,
+}
+
+impl std::fmt::Display for MessageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DstNexists => write!(
+                f,
+                "nonexistent destination; chat is undefined or recipient is unrecognized"
+            ),
+            Self::ChatTaken => write!(
+                f,
+                "a chat with that name already exists, you do not have permission to overwrite it"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MessageError {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ServerMessage {
     Acknowledge,
     Success,
-    Error(String),
+    Error(MessageError),
     CreateChat {
         destination: Destination,
         members: BTreeSet<SocketAddr>,
@@ -232,8 +255,7 @@ impl ServerMessage {
 
             Self::Error(e) => {
                 stream.write_all(const { &[Self::ERROR_CODE] })?;
-                write_int!((TextLen) [..=MAX_TEXT_BYTES] "message too long" (e.len()) -> stream)?;
-                stream.write_all(e.as_bytes())?;
+                stream.write_all(&[*e as u8])?;
             }
 
             Self::CreateChat {
@@ -260,10 +282,16 @@ impl ServerMessage {
 
             Self::SUCCESS_CODE => Ok(Self::Success),
 
-            Self::ERROR_CODE => {
-                let msg_len = read_int!((TextLen) stream)?;
-                read_string!([msg_len as usize] stream).map(Self::Error)
-            }
+            Self::ERROR_CODE => Ok(Self::Error(match read_int!((u8) stream)? {
+                0 => MessageError::DstNexists,
+
+                code => {
+                    return Err(io::Error::other(format!(
+                        "unknown error code: {code} ('{}')",
+                        char::from(code)
+                    )));
+                }
+            })),
 
             Self::CREATE_CHAT_CODE => {
                 let dst_len = read_int!((DestinationLen) stream)?;
