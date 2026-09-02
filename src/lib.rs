@@ -9,8 +9,6 @@ use std::{
 };
 
 pub const ADDRESS: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
-const START_OF_TEXT: u8 = 1;
-const START_OF_SVRM: u8 = 2;
 
 macro_rules! read_int {
     (($Int:ty) $stream:expr) => {{
@@ -32,6 +30,17 @@ macro_rules! read_string {
     ([$len:expr] $stream:expr) => {{
         read_vec!([$len] $stream)
             .and_then(|data| String::from_utf8(data).map_err(io::Error::other))
+    }};
+}
+
+macro_rules! read_socket_addr {
+    ([$len:expr] $stream:expr) => {{
+        read_string!([$len] $stream)
+            .and_then(|data|
+                (!data.is_empty())
+                    .then(|| data.parse::<SocketAddr>().map_err(io::Error::other))
+                    .transpose()
+            )
     }};
 }
 
@@ -105,6 +114,11 @@ portable_size! {
     pub MAX_DESTINATION_BYTES = 2048;
 }
 
+portable_size! {
+    pub SocketAddrLen = u8;
+    pub MAX_SOCKET_ADDR_BYTES = 256;
+}
+
 /// At most [`MAX_DESTINATION_BYTES`] bytes.
 type Destination = String;
 
@@ -120,6 +134,12 @@ portable_size! {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct UserMessage {
+    /// Server will use [`None`] to indicate "sent by server".
+    /// Server will overwrite with client's actual address.
+    /// Manual assignment by client will be ignored
+    /// (and potentially flagged as suspicious if not matching their actual address).
+    pub sender: Option<SocketAddr>,
+
     pub destination: Destination,
 
     /// At most [`MAX_TEXT_BYTES`] bytes
@@ -130,11 +150,13 @@ pub struct UserMessage {
 }
 
 impl UserMessage {
-    pub fn write_to<W: Write>(&self, mut stream: W) -> io::Result<()> {
-        // write the message content
-        write_int!((DestinationLen) [..MAX_DESTINATION_BYTES] "destination too long" (self.destination.len()) -> stream)?;
+    fn write_to<W: Write>(&self, mut stream: W) -> io::Result<()> {
+        let sender = self.sender.map(|x| x.to_string()).unwrap_or_default();
+        write_int!((SocketAddrLen) [..=MAX_SOCKET_ADDR_BYTES] "???" (sender.len()) -> stream)?;
+        write_int!((DestinationLen) [..=MAX_DESTINATION_BYTES] "destination too long" (self.destination.len()) -> stream)?;
         write_int!((TextLen) [..=MAX_TEXT_BYTES] "message too long" (self.text.len()) -> stream)?;
         write_int!((AttachmentCount) [..=MAX_ATTACHMENTS] "too many attachments" (self.attachments.len()) -> stream)?;
+        stream.write_all(sender.as_bytes())?;
         stream.write_all(self.destination.as_bytes())?;
         stream.write_all(self.text.as_bytes())?;
         for attachment in &self.attachments {
@@ -147,11 +169,12 @@ impl UserMessage {
         Ok(())
     }
 
-    pub fn read_from<R: Read>(mut stream: R) -> io::Result<Self> {
-        // read the message content
+    fn read_from<R: Read>(mut stream: R) -> io::Result<Self> {
+        let sender_len = read_int!((SocketAddrLen) stream)?;
         let destination_len = read_int!((DestinationLen) stream)?;
         let text_len = read_int!((TextLen) stream)?;
         let attachment_count = read_int!((AttachmentCount) stream)?;
+        let sender = read_socket_addr!([sender_len as usize] stream)?;
         let destination = read_string!([destination_len as usize] stream)?;
         let text = read_string!([text_len as usize] stream)?;
         let attachments = std::iter::repeat_with(|| {
@@ -171,6 +194,7 @@ impl UserMessage {
         .collect::<io::Result<Vec<_>>>()?;
 
         Ok(Self {
+            sender,
             destination,
             text,
             attachments,
@@ -185,6 +209,9 @@ portable_size! {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ServerMessage {
+    Acknowledge,
+    Success,
+    Error(String),
     CreateChat {
         destination: Destination,
         members: BTreeSet<SocketAddr>,
@@ -192,15 +219,28 @@ pub enum ServerMessage {
 }
 
 impl ServerMessage {
-    const CREATE_CHAT_VARIANT: u8 = 0;
+    const ACKNOWLEDGE_CODE: u8 = 0;
+    const SUCCESS_CODE: u8 = 1;
+    const ERROR_CODE: u8 = 2;
+    const CREATE_CHAT_CODE: u8 = 3;
 
-    pub fn write_to<W: Write>(&self, mut stream: W) -> io::Result<()> {
+    fn write_to<W: Write>(&self, mut stream: W) -> io::Result<()> {
         match self {
+            Self::Acknowledge => stream.write_all(const { &[Self::ACKNOWLEDGE_CODE] })?,
+
+            Self::Success => stream.write_all(const { &[Self::SUCCESS_CODE] })?,
+
+            Self::Error(e) => {
+                stream.write_all(const { &[Self::ERROR_CODE] })?;
+                write_int!((TextLen) [..=MAX_TEXT_BYTES] "message too long" (e.len()) -> stream)?;
+                stream.write_all(e.as_bytes())?;
+            }
+
             Self::CreateChat {
                 destination,
                 members,
             } => {
-                stream.write_all(&[Self::CREATE_CHAT_VARIANT])?;
+                stream.write_all(const { &[Self::CREATE_CHAT_CODE] })?;
                 write_int!((DestinationLen) [..=MAX_DESTINATION_BYTES] "destination too long" (destination.len()) -> stream)?;
                 write_int!((MemberCount) [..=MAX_CHAT_MEMBERS] "too many members" (members.len()) -> stream)?;
                 stream.write_all(destination.as_bytes())?;
@@ -214,9 +254,18 @@ impl ServerMessage {
         Ok(())
     }
 
-    pub fn read_from<R: Read>(mut stream: R) -> io::Result<Self> {
+    fn read_from<R: Read>(mut stream: R) -> io::Result<Self> {
         match read_int!((u8) stream)? {
-            Self::CREATE_CHAT_VARIANT => {
+            Self::ACKNOWLEDGE_CODE => Ok(Self::Acknowledge),
+
+            Self::SUCCESS_CODE => Ok(Self::Success),
+
+            Self::ERROR_CODE => {
+                let msg_len = read_int!((TextLen) stream)?;
+                read_string!([msg_len as usize] stream).map(Self::Error)
+            }
+
+            Self::CREATE_CHAT_CODE => {
                 let dst_len = read_int!((DestinationLen) stream)?;
                 let member_count = read_int!((MemberCount) stream)?;
                 Ok(Self::CreateChat {
@@ -231,7 +280,10 @@ impl ServerMessage {
                 })
             }
 
-            _ => Err(io::Error::other("unknown variant")),
+            code => Err(io::Error::other(format!(
+                "unknown code: {code} ('{}')",
+                char::from(code)
+            ))),
         }
     }
 }
@@ -274,16 +326,19 @@ pub enum Message {
 }
 
 impl Message {
+    const USER_MESSAGE_CODE: u8 = 1;
+    const SERVER_MESSAGE_CODE: u8 = 2;
+
     pub fn write_to(&self, stream: &mut TcpStream) -> io::Result<()> {
         match self {
             Self::User(msg) => {
                 // indicate an incoming message
-                stream.write_all(&[START_OF_TEXT])?;
+                stream.write_all(&[Self::USER_MESSAGE_CODE])?;
                 msg.write_to(stream)
             }
             Self::Server(msg) => {
                 // indicate an incoming message
-                stream.write_all(&[START_OF_SVRM])?;
+                stream.write_all(&[Self::SERVER_MESSAGE_CODE])?;
                 msg.write_to(stream)
             }
         }
@@ -300,9 +355,10 @@ impl Message {
         // block until the full message is read
         let mut tkn = TempBlockingTkn::begin(stream)?;
 
+        // println!("message type: {msg_type:?} ('{}')", char::from(msg_type));
         Ok(Some(match msg_type {
-            START_OF_TEXT => Message::User(UserMessage::read_from(&mut *tkn)?),
-            START_OF_SVRM => Message::Server(ServerMessage::read_from(&mut *tkn)?),
+            Self::USER_MESSAGE_CODE => Message::User(UserMessage::read_from(&mut *tkn)?),
+            Self::SERVER_MESSAGE_CODE => Message::Server(ServerMessage::read_from(&mut *tkn)?),
 
             _ => {
                 eprintln!(

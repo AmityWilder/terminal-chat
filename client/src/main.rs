@@ -4,10 +4,18 @@ use std::{io, net::TcpStream, sync::mpsc};
 use terminal_chat::{ADDRESS, Message, ServerMessage, StdinChannel, UserMessage};
 
 fn display_message(msg: &UserMessage) {
+    println!(
+        "\x1b[90mfrom \x1b[93m{}\x1b[90m in \x1b[93m{}\x1b[90m:\x1b[0m",
+        msg.sender
+            .map(|x| x.to_string())
+            .unwrap_or("[null]".to_string()),
+        &msg.destination
+    );
     println!("{}", msg.text);
     for image in &msg.attachments {
         println!("image: {}", image.alt_text);
     }
+    println!("\x1b[90m------\x1b[0m")
 }
 
 fn main() {
@@ -25,9 +33,17 @@ fn main() {
             Ok(text) => {
                 if let Some(cmd) = text.strip_prefix('/') {
                     let (cmd, args) = cmd.split_at(cmd.find(' ').unwrap_or(cmd.len()));
+                    let args = args.trim();
                     match cmd {
-                        "setdst" => {
-                            println!("rerouting to `{args}`");
+                        "setchat" => {
+                            println!("future messages will be delivered to to `{args}`");
+                            if args.contains(|ch: char| ch.is_whitespace()) {
+                                eprintln!(
+                                    "warning: `{args}` contains whitespace characters.
+                                    whitespace in chat names is not currently supported,
+                                    so your messages might not be delivered"
+                                );
+                            }
                             curr_dest.clear();
                             curr_dest.push_str(args);
                         }
@@ -44,6 +60,12 @@ fn main() {
                                         ),
 
                                         Ok(members) => {
+                                            println!(
+                                                "auto-switching current chat to `{destination}`"
+                                            );
+                                            curr_dest.clear();
+                                            curr_dest.push_str(&destination);
+
                                             let message =
                                                 Message::Server(ServerMessage::CreateChat {
                                                     destination,
@@ -63,12 +85,13 @@ fn main() {
                     }
                 } else {
                     let message = Message::User(UserMessage {
+                        sender: None,
                         destination: curr_dest.clone(),
                         text,
                         attachments: Vec::new(),
                     });
 
-                    println!("sending \"{message:?}\"...");
+                    // println!("sending \"{message:?}\"...");
 
                     if let Err(e) = message.write_to(&mut stream) {
                         eprintln!("failed to send message: {e}");
@@ -103,12 +126,17 @@ fn main() {
                 break;
             }
             Ok(Some(msg)) => match msg {
-                Message::User(msg) => {
-                    println!("message from server:\n```");
-                    display_message(&msg);
-                    println!("```");
+                Message::User(umsg) => display_message(&umsg),
+                Message::Server(smsg) => {
+                    print!("server response: ");
+                    match smsg {
+                        ServerMessage::Acknowledge => println!("acknowledged"),
+                        ServerMessage::Success => println!("success"),
+                        ServerMessage::Error(e) => println!("error: {e}"),
+
+                        ServerMessage::CreateChat { .. } => eprintln!("[unintended recipient]"),
+                    }
                 }
-                Message::Server(_) => eprintln!("unexpected message type: {msg:?}"),
             },
         }
     }
