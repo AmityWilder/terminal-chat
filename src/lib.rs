@@ -1,6 +1,7 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 use std::{
+    collections::BTreeSet,
     io::{self, Read, Write},
     net::{Ipv4Addr, SocketAddr, TcpStream},
     sync::mpsc::{self, Receiver},
@@ -186,7 +187,7 @@ portable_size! {
 pub enum ServerMessage {
     CreateChat {
         destination: Destination,
-        members: Vec<SocketAddr>,
+        members: BTreeSet<SocketAddr>,
     },
 }
 
@@ -226,7 +227,7 @@ impl ServerMessage {
                         addr.parse().map_err(io::Error::other)
                     })
                     .take(member_count as usize)
-                    .collect::<io::Result<Vec<_>>>()?,
+                    .collect::<io::Result<_>>()?,
                 })
             }
 

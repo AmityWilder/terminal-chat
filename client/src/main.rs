@@ -1,10 +1,6 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
-use std::{
-    io,
-    net::{SocketAddr, TcpStream},
-    sync::mpsc,
-};
+use std::{io, net::TcpStream, sync::mpsc};
 use terminal_chat::{ADDRESS, Message, ServerMessage, StdinChannel, UserMessage};
 
 fn display_message(msg: &UserMessage) {
@@ -42,10 +38,7 @@ fn main() {
                                 None => eprintln!("missing destination"),
 
                                 Some(destination) => {
-                                    match it
-                                        .map(|x| x.parse())
-                                        .collect::<Result<Vec<SocketAddr>, _>>()
-                                    {
+                                    match it.map(|x| x.parse()).collect::<Result<_, _>>() {
                                         Err(e) => eprintln!(
                                             "failed to parse member (expecting SocketAddr): {e}"
                                         ),

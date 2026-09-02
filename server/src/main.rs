@@ -98,7 +98,7 @@ fn main() {
                                         response!(("failed: already exists") -> (addr) via socket);
                                     }
                                     Entry::Vacant(entry) => {
-                                        entry.insert(members);
+                                        entry.insert(members).insert(*addr);
                                         println!("chat created");
                                         response!(("success") -> (addr) via socket);
                                     }
