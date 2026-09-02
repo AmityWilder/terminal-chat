@@ -48,7 +48,7 @@ fn main() {
                     println!("message from client {addr}:\n```\n{msg:?}\n```");
                     Message {
                         text: "acknowledged".to_string(),
-                        images: Vec::new(),
+                        attachments: Vec::new(),
                     }
                     .write_to(socket)
                     .expect("failed to send response to client");

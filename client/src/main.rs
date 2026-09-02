@@ -5,7 +5,7 @@ use terminal_chat::{ADDRESS, Message};
 
 fn display_message(msg: &Message) {
     println!("{}", msg.text);
-    for image in &msg.images {
+    for image in &msg.attachments {
         println!("image: {}", image.alt_text);
     }
 }
@@ -38,7 +38,7 @@ fn main() {
             Ok(text) => {
                 let message = Message {
                     text,
-                    images: Vec::new(),
+                    attachments: Vec::new(),
                 };
 
                 println!("sending \"{message:?}\"...");

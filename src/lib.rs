@@ -8,48 +8,35 @@ use std::{
 pub const ADDRESS: SocketAddr =
     SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
 
-trait FromBytes<const N: usize>: Sized {
-    fn from_bytes(data: [u8; N]) -> Self;
-
-    fn read<R: Read>(mut stream: R) -> io::Result<Self> {
-        let mut text_len = [0; _];
-        stream.read_exact(&mut text_len)?;
-        Ok(Self::from_bytes(text_len))
-    }
+macro_rules! read_int {
+    (($Int:ty) $stream:expr) => {{
+        let mut value = [0; _];
+        $stream
+            .read_exact(&mut value)
+            .map(|()| <$Int>::from_le_bytes(value))
+    }};
 }
 
-trait ToBytes<const N: usize>: Sized {
-    fn to_bytes(self) -> [u8; N];
-
-    fn write<W: Write>(self, mut stream: W) -> io::Result<()> {
-        stream.write_all(&self.to_bytes())
-    }
+macro_rules! read_vec {
+    ([$len:expr] $stream:expr) => {{
+        let mut data = vec![0; $len];
+        $stream.read_exact(&mut data).map(|()| data)
+    }};
 }
 
-macro_rules! int_byte_conversion {
-    ($($Type:ty),+) => {$(
-        impl FromBytes<{ std::mem::size_of::<$Type>() }> for $Type {
-            fn from_bytes(data: [u8; std::mem::size_of::<$Type>()]) -> Self {
-                Self::from_le_bytes(data)
-            }
-        }
-        impl ToBytes<{ std::mem::size_of::<$Type>() }> for $Type {
-            fn to_bytes(self) -> [u8; std::mem::size_of::<$Type>()] {
-                self.to_le_bytes()
-            }
-        }
-    )+};
+macro_rules! read_string {
+    ([$len:expr] $stream:expr) => {{
+        read_vec!([$len] $stream)
+            .and_then(|data| String::from_utf8(data).map_err(io::Error::other))
+    }};
 }
 
-fn read_str_len<R: Read>(mut stream: R, len: usize) -> io::Result<String> {
-    let mut text = vec![0; len];
-    stream.read_exact(&mut text)?;
-    String::from_utf8(text).map_err(io::Error::other)
+macro_rules! write_int {
+    (($Int:ty) [$range:expr] $error:literal ($value:expr) -> $stream:expr) => {{
+        assert!($range.contains(&$value), $error);
+        $stream.write_all(&<$Int>::try_from($value).unwrap().to_le_bytes())
+    }};
 }
-
-int_byte_conversion!(
-    u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize
-);
 
 macro_rules! portable_size {
     (
@@ -118,98 +105,63 @@ pub struct Message {
     pub text: String,
 
     /// At most [`MAX_ATTACHMENTS`] images
-    pub images: Vec<Attachment>,
+    pub attachments: Vec<Attachment>,
 }
 
 const START_OF_TEXT: u8 = 1;
 
 impl Message {
     pub fn write_to(&self, stream: &mut TcpStream) -> io::Result<()> {
+        // indicate an incoming message
         stream.write_all(const { &[START_OF_TEXT] })?;
-        assert!(self.text.len() <= MAX_TEXT_BYTES, "invalid text length");
 
-        stream.write_all(&TextLen::try_from(self.text.len()).unwrap().to_le_bytes())?;
-        assert!(self.images.len() <= MAX_ATTACHMENTS, "invalid image count");
-
-        stream.write_all(
-            &AttachmentCount::try_from(self.images.len())
-                .unwrap()
-                .to_le_bytes(),
-        )?;
-
+        // write the message content
+        write_int!((TextLen) [..=MAX_TEXT_BYTES] "message too long" (self.text.len()) -> stream)?;
+        write_int!((AttachmentCount) [..=MAX_ATTACHMENTS] "too many attachments" (self.attachments.len()) -> stream)?;
         stream.write_all(self.text.as_bytes())?;
-        for image in &self.images {
-            assert!(
-                image.filename.len() <= MAX_FILENAME_BYTES,
-                "invalid image alt text length"
-            );
-            stream.write_all(
-                &FilenameLen::try_from(image.filename.len())
-                    .unwrap()
-                    .to_le_bytes(),
-            )?;
-
-            assert!(
-                image.alt_text.len() <= MAX_ALT_TEXT_BYTES,
-                "invalid image alt text length"
-            );
-            stream.write_all(
-                &AltTextLen::try_from(image.alt_text.len())
-                    .unwrap()
-                    .to_le_bytes(),
-            )?;
-
-            assert!(
-                image.data.len() <= MAX_ATTACHMENT_BYTES,
-                "invalid image data size"
-            );
-            stream.write_all(
-                &AttachmentSize::try_from(image.data.len())
-                    .unwrap()
-                    .to_le_bytes(),
-            )?;
-
-            stream.write_all(image.alt_text.as_bytes())?;
-            stream.write_all(&image.data)?;
+        for attachment in &self.attachments {
+            write_int!((FilenameLen) [..=MAX_FILENAME_BYTES] "filename too long" (attachment.filename.len()) -> stream)?;
+            write_int!((AltTextLen) [..=MAX_ALT_TEXT_BYTES] "alt text too long" (attachment.alt_text.len()) -> stream)?;
+            write_int!((AttachmentSize) [..=MAX_ATTACHMENT_BYTES] "attachment too large" (attachment.data.len()) -> stream)?;
+            stream.write_all(attachment.alt_text.as_bytes())?;
+            stream.write_all(attachment.data.as_slice())?;
         }
+
         Ok(())
     }
 
     pub fn read_from(stream: &mut TcpStream) -> io::Result<Option<Self>> {
         let mut buf = [0];
+        // is a message incoming?
         if stream.read(&mut buf)? == 0 {
             return Ok(None);
         }
         assert_eq!(buf, [START_OF_TEXT]);
+
         stream.set_nonblocking(false)?; // we want to block to read the rest of the message
 
-        let text_len = TextLen::read(&mut *stream)?;
-        let attachment_count = AttachmentCount::read(&mut *stream)?;
-
-        let res = Self {
-            text: read_str_len(&mut *stream, text_len as usize)?,
-            images: std::iter::repeat_with(|| {
-                let filename_len = FilenameLen::read(&mut *stream)?;
-                let alt_len = AltTextLen::read(&mut *stream)?;
-                let attachment_size = AttachmentSize::read(&mut *stream)?;
-
-                let file_name = read_str_len(&mut *stream, filename_len as usize)?;
-                let alt_text = read_str_len(&mut *stream, alt_len as usize)?;
-
-                let mut data = vec![0; attachment_size as usize];
-                stream.read_exact(&mut data)?;
-
-                Ok(Attachment {
-                    filename: file_name,
-                    alt_text,
-                    data,
-                })
+        // read the message content
+        let text_len = read_int!((TextLen) stream)?;
+        let attachment_count = read_int!((AttachmentCount) stream)?;
+        let text = read_string!([text_len as usize] stream)?;
+        let attachments = std::iter::repeat_with(|| {
+            let filename_len = read_int!((FilenameLen) stream)?;
+            let alt_len = read_int!((AltTextLen) stream)?;
+            let attachment_size = read_int!((AttachmentSize) stream)?;
+            let file_name = read_string!([filename_len as usize] stream)?;
+            let alt_text = read_string!([alt_len as usize] stream)?;
+            let data = read_vec!([attachment_size as usize] stream)?;
+            Ok(Attachment {
+                filename: file_name,
+                alt_text,
+                data,
             })
-            .take(attachment_count as usize)
-            .collect::<io::Result<Vec<_>>>()?,
-        };
+        })
+        .take(attachment_count as usize)
+        .collect::<io::Result<Vec<_>>>()?;
 
         stream.set_nonblocking(true)?; // now that the message is finished being read, we can go nonblocking again
-        Ok(Some(res))
+
+        Ok(Some(Self { text, attachments }))
     }
 }
