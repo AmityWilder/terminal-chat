@@ -4,8 +4,10 @@ use std::{
     collections::BTreeSet,
     io::{self, Read, Write},
     net::{Ipv4Addr, SocketAddr, TcpStream},
+    path::Path,
     sync::mpsc::{self, Receiver},
     thread::{self, JoinHandle},
+    time::{Duration, SystemTime},
 };
 
 pub const ADDRESS: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
@@ -16,6 +18,12 @@ macro_rules! read_int {
         $stream
             .read_exact(&mut value)
             .map(|()| <$Int>::from_le_bytes(value))
+    }};
+}
+
+macro_rules! read_timestamp {
+    ($stream:expr) => {{
+        read_int!((u64) $stream).map(|ms| SystemTime::UNIX_EPOCH + Duration::from_millis(ms))
     }};
 }
 
@@ -45,17 +53,36 @@ macro_rules! read_socket_addr {
 }
 
 macro_rules! write_int {
-    (($Int:ty) [$range:expr] $error:literal ($value:expr) -> $stream:expr) => {{
+    (($value:expr) -> $stream:expr) => {
+        $stream.write_all(&$value.to_le_bytes())
+    };
+}
+
+macro_rules! write_int_narrowed {
+    (($Int:ty) ($value:expr) -> $stream:expr) => {
+        <$Int>::try_from($value)
+            .map_err(io::Error::other)
+            .and_then(|n| write_int!((n) -> $stream))
+    };
+}
+
+macro_rules! write_int_ranged {
+    (($Int:ty) [$range:expr] $error:literal ($value:expr) -> $stream:expr) => {
         if $range.contains(&$value) {
-            $stream.write_all(
-                &<$Int>::try_from($value)
-                    .expect("assertion should cover this")
-                    .to_le_bytes(),
-            )
+            write_int_narrowed!(($Int) ($value) -> $stream)
         } else {
             Err(io::Error::other($error))
         }
-    }};
+    };
+}
+
+macro_rules! write_timestamp {
+    (($value:expr) -> $stream:expr) => {
+        $value
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_err(io::Error::other)
+            .and_then(|dur| write_int_narrowed!((u64) (dur.as_millis()) -> $stream))
+    };
 }
 
 macro_rules! portable_size {
@@ -63,7 +90,7 @@ macro_rules! portable_size {
         $(#[$typedoc:meta])*
         $typevis:vis $Type:ident = $Repr:ty;
         $(#[$maxdoc:meta])*
-        $maxvis:vis $MAX:ident = $amount:literal;
+        $maxvis:vis $MAX:ident = $amount:expr;
     ) => {
         /// Portable type for streaming size data
         $(#[$typedoc])*
@@ -109,6 +136,25 @@ pub struct Attachment {
     pub data: Vec<u8>,
 }
 
+impl Attachment {
+    pub fn new(path: &Path, alt_text: String) -> io::Result<Self> {
+        if path.is_file() {
+            let data = std::fs::read(path)?;
+            Ok(Self {
+                filename: path
+                    .file_name()
+                    .expect("file cannot terminate in `..`")
+                    .to_string_lossy()
+                    .to_string(),
+                alt_text,
+                data,
+            })
+        } else {
+            Err(io::Error::other("no such file"))
+        }
+    }
+}
+
 portable_size! {
     pub DestinationLen = u16;
     pub MAX_DESTINATION_BYTES = 2048;
@@ -132,7 +178,7 @@ portable_size! {
     pub MAX_ATTACHMENTS = 8;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UserMessage {
     /// Server will use [`None`] to indicate "sent by server".
     /// Server will overwrite with client's actual address.
@@ -142,6 +188,10 @@ pub struct UserMessage {
 
     pub destination: Destination,
 
+    /// The server will always replace this value with the time *it* received the message.
+    /// Clients can be tampered with and are not trusted to make claims about baseline reality.
+    pub timestamp: SystemTime,
+
     /// At most [`MAX_TEXT_BYTES`] bytes
     pub text: String,
 
@@ -149,20 +199,43 @@ pub struct UserMessage {
     pub attachments: Vec<Attachment>,
 }
 
+impl Default for UserMessage {
+    fn default() -> Self {
+        Self {
+            sender: Default::default(),
+            destination: Default::default(),
+            timestamp: SystemTime::now(),
+            text: Default::default(),
+            attachments: Default::default(),
+        }
+    }
+}
+
 impl UserMessage {
+    pub fn new(destination: Destination, text: String, attachments: Vec<Attachment>) -> Self {
+        Self {
+            sender: None,
+            destination,
+            timestamp: SystemTime::now(),
+            text,
+            attachments,
+        }
+    }
+
     fn write_to<W: Write>(&self, mut stream: W) -> io::Result<()> {
         let sender = self.sender.map(|x| x.to_string()).unwrap_or_default();
-        write_int!((SocketAddrLen) [..=MAX_SOCKET_ADDR_BYTES] "???" (sender.len()) -> stream)?;
-        write_int!((DestinationLen) [..=MAX_DESTINATION_BYTES] "destination too long" (self.destination.len()) -> stream)?;
-        write_int!((TextLen) [..=MAX_TEXT_BYTES] "message too long" (self.text.len()) -> stream)?;
-        write_int!((AttachmentCount) [..=MAX_ATTACHMENTS] "too many attachments" (self.attachments.len()) -> stream)?;
+        write_int_ranged!((SocketAddrLen) [..=MAX_SOCKET_ADDR_BYTES] "???" (sender.len()) -> stream)?;
+        write_int_ranged!((DestinationLen) [..=MAX_DESTINATION_BYTES] "destination too long" (self.destination.len()) -> stream)?;
+        write_int_ranged!((TextLen) [..=MAX_TEXT_BYTES] "message too long" (self.text.len()) -> stream)?;
+        write_int_ranged!((AttachmentCount) [..=MAX_ATTACHMENTS] "too many attachments" (self.attachments.len()) -> stream)?;
         stream.write_all(sender.as_bytes())?;
         stream.write_all(self.destination.as_bytes())?;
+        write_timestamp!((SystemTime::now()) -> stream)?;
         stream.write_all(self.text.as_bytes())?;
         for attachment in &self.attachments {
-            write_int!((FilenameLen) [..=MAX_FILENAME_BYTES] "filename too long" (attachment.filename.len()) -> stream)?;
-            write_int!((AltTextLen) [..=MAX_ALT_TEXT_BYTES] "alt text too long" (attachment.alt_text.len()) -> stream)?;
-            write_int!((AttachmentSize) [..=MAX_ATTACHMENT_BYTES] "attachment too large" (attachment.data.len()) -> stream)?;
+            write_int_ranged!((FilenameLen) [..=MAX_FILENAME_BYTES] "filename too long" (attachment.filename.len()) -> stream)?;
+            write_int_ranged!((AltTextLen) [..=MAX_ALT_TEXT_BYTES] "alt text too long" (attachment.alt_text.len()) -> stream)?;
+            write_int_ranged!((AttachmentSize) [..=MAX_ATTACHMENT_BYTES] "attachment too large" (attachment.data.len()) -> stream)?;
             stream.write_all(attachment.alt_text.as_bytes())?;
             stream.write_all(attachment.data.as_slice())?;
         }
@@ -176,6 +249,7 @@ impl UserMessage {
         let attachment_count = read_int!((AttachmentCount) stream)?;
         let sender = read_socket_addr!([sender_len as usize] stream)?;
         let destination = read_string!([destination_len as usize] stream)?;
+        let timestamp = read_timestamp!(stream)?;
         let text = read_string!([text_len as usize] stream)?;
         let attachments = std::iter::repeat_with(|| {
             let filename_len = read_int!((FilenameLen) stream)?;
@@ -196,6 +270,7 @@ impl UserMessage {
         Ok(Self {
             sender,
             destination,
+            timestamp,
             text,
             attachments,
         })
@@ -211,6 +286,27 @@ portable_size! {
 pub enum MessageError {
     DstNexists,
     ChatTaken,
+}
+
+impl From<MessageError> for u8 {
+    fn from(value: MessageError) -> Self {
+        match value {
+            MessageError::DstNexists => 0,
+            MessageError::ChatTaken => 1,
+        }
+    }
+}
+
+impl TryFrom<u8> for MessageError {
+    type Error = u8;
+
+    fn try_from(code: u8) -> Result<Self, Self::Error> {
+        match code {
+            0 => Ok(Self::DstNexists),
+            1 => Ok(Self::ChatTaken),
+            _ => Err(code),
+        }
+    }
 }
 
 impl std::fmt::Display for MessageError {
@@ -255,7 +351,7 @@ impl ServerMessage {
 
             Self::Error(e) => {
                 stream.write_all(const { &[Self::ERROR_CODE] })?;
-                stream.write_all(&[*e as u8])?;
+                stream.write_all(&[(*e).into()])?;
             }
 
             Self::CreateChat {
@@ -263,12 +359,12 @@ impl ServerMessage {
                 members,
             } => {
                 stream.write_all(const { &[Self::CREATE_CHAT_CODE] })?;
-                write_int!((DestinationLen) [..=MAX_DESTINATION_BYTES] "destination too long" (destination.len()) -> stream)?;
-                write_int!((MemberCount) [..=MAX_CHAT_MEMBERS] "too many members" (members.len()) -> stream)?;
+                write_int_ranged!((DestinationLen) [..=MAX_DESTINATION_BYTES] "destination too long" (destination.len()) -> stream)?;
+                write_int_ranged!((MemberCount) [..=MAX_CHAT_MEMBERS] "too many members" (members.len()) -> stream)?;
                 stream.write_all(destination.as_bytes())?;
                 for member in members {
                     let addr = member.to_string();
-                    write_int!((u8) [..=256] "address too long" (addr.len()) -> stream)?;
+                    write_int_ranged!((u8) [..=256] "address too long" (addr.len()) -> stream)?;
                     stream.write_all(addr.as_bytes())?;
                 }
             }
@@ -282,16 +378,17 @@ impl ServerMessage {
 
             Self::SUCCESS_CODE => Ok(Self::Success),
 
-            Self::ERROR_CODE => Ok(Self::Error(match read_int!((u8) stream)? {
-                0 => MessageError::DstNexists,
-
-                code => {
-                    return Err(io::Error::other(format!(
-                        "unknown error code: {code} ('{}')",
-                        char::from(code)
-                    )));
-                }
-            })),
+            Self::ERROR_CODE => {
+                read_int!((u8) stream)?
+                    .try_into()
+                    .map(Self::Error)
+                    .map_err(|code| {
+                        io::Error::other(format!(
+                            "unknown error code: {code} ('{}')",
+                            char::from(code)
+                        ))
+                    })
+            }
 
             Self::CREATE_CHAT_CODE => {
                 let dst_len = read_int!((DestinationLen) stream)?;

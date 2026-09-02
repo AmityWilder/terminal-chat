@@ -1,17 +1,21 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
-use std::{io, net::TcpStream, sync::mpsc};
+use std::{io, net::TcpStream, sync::mpsc, time::SystemTime};
 use terminal_chat::{ADDRESS, Message, ServerMessage, StdinChannel, UserMessage};
 
 fn display_message(msg: &UserMessage) {
-    println!(
-        "\x1b[90mfrom \x1b[94m{}\x1b[90m in \x1b[94m{}\x1b[90m:\x1b[0m",
+    print!(
+        "\x1b[90mfrom \x1b[94m{}\x1b[90m in \x1b[94m{}\x1b[90m at ",
         msg.sender
             .map(|x| x.to_string())
             .unwrap_or("[null]".to_string()),
         &msg.destination
     );
-    println!("{}", msg.text);
+    match msg.timestamp.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(dur) => print!("{}ms since unix epoch", dur.as_millis()),
+        Err(e) => print!("\x1b[91m{e}"),
+    }
+    println!("\x1b[90m:\x1b[0m\n{}", msg.text);
     for image in &msg.attachments {
         println!("image: {}", image.alt_text);
     }
@@ -84,16 +88,8 @@ fn main() {
                         _ => eprintln!("unknown command: {cmd}"),
                     }
                 } else {
-                    let message = Message::User(UserMessage {
-                        sender: None,
-                        destination: curr_dest.clone(),
-                        text,
-                        attachments: Vec::new(),
-                    });
-
-                    // println!("sending \"{message:?}\"...");
-
-                    if let Err(e) = message.write_to(&mut stream) {
+                    let msg = Message::User(UserMessage::new(curr_dest.clone(), text, Vec::new()));
+                    if let Err(e) = msg.write_to(&mut stream) {
                         eprintln!("failed to send message: {e}");
                     }
                 }
@@ -128,13 +124,15 @@ fn main() {
             Ok(Some(msg)) => match msg {
                 Message::User(umsg) => display_message(&umsg),
                 Message::Server(smsg) => {
-                    print!("server response: ");
+                    // print!("server response: ");
                     match smsg {
-                        ServerMessage::Acknowledge => println!("acknowledged"),
-                        ServerMessage::Success => println!("success"),
-                        ServerMessage::Error(e) => println!("error: {e}"),
+                        ServerMessage::Acknowledge => println!("\x1b[90macknowledged\x1b[0m"),
+                        ServerMessage::Success => println!("\x1b[94msuccess\x1b[0m"),
+                        ServerMessage::Error(e) => println!("\x1b[91merror: {e}\x1b[0m"),
 
-                        ServerMessage::CreateChat { .. } => eprintln!("[unintended recipient]"),
+                        ServerMessage::CreateChat { .. } => {
+                            eprintln!("\x1b[90m[unintended recipient]\x1b[0m")
+                        }
                     }
                 }
             },
