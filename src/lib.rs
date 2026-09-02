@@ -33,8 +33,15 @@ macro_rules! read_string {
 
 macro_rules! write_int {
     (($Int:ty) [$range:expr] $error:literal ($value:expr) -> $stream:expr) => {{
-        assert!($range.contains(&$value), $error);
-        $stream.write_all(&<$Int>::try_from($value).unwrap().to_le_bytes())
+        if $range.contains(&$value) {
+            $stream.write_all(
+                &<$Int>::try_from($value)
+                    .expect("assertion should cover this")
+                    .to_le_bytes(),
+            )
+        } else {
+            Err(io::Error::other($error))
+        }
     }};
 }
 
