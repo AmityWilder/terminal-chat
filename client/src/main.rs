@@ -1,7 +1,7 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
-use std::{io, net::TcpStream, sync::mpsc, thread};
-use terminal_chat::{ADDRESS, Message};
+use std::{io, net::TcpStream, sync::mpsc};
+use terminal_chat::{ADDRESS, Message, StdinChannel};
 
 fn display_message(msg: &Message) {
     println!("{}", msg.text);
@@ -11,22 +11,7 @@ fn display_message(msg: &Message) {
 }
 
 fn main() {
-    let (sndr, rcvr) = mpsc::channel::<String>();
-    thread::Builder::new()
-        .name("stdin channel".to_string())
-        .spawn(move || {
-            loop {
-                let mut buffer = String::new();
-                io::stdin()
-                    .read_line(&mut buffer)
-                    .expect("failed to read input");
-                while buffer.ends_with(['\n', '\r']) {
-                    buffer.pop();
-                }
-                sndr.send(buffer).expect("failed to send buffer");
-            }
-        })
-        .expect("failed to spawn thread");
+    let stdin = StdinChannel::new();
 
     let mut stream = TcpStream::connect(ADDRESS).expect("failed to create client");
     stream
@@ -34,7 +19,7 @@ fn main() {
         .expect("cannot set nonblocking");
 
     loop {
-        match rcvr.try_recv() {
+        match stdin.try_recv() {
             Ok(text) => {
                 let message = Message {
                     text,
@@ -66,11 +51,14 @@ fn main() {
                             | io::ErrorKind::ConnectionReset
                             | io::ErrorKind::NotConnected
                     ) {
-                        return;
+                        break;
                     }
                 }
             }
-            Ok(None) => println!("server responded without a message"),
+            Ok(None) => {
+                println!("server lost");
+                break;
+            }
             Ok(Some(msg)) => {
                 println!("message from server {ADDRESS}:\n```");
                 display_message(&msg);
@@ -78,4 +66,5 @@ fn main() {
             }
         }
     }
+    println!("shutting down");
 }

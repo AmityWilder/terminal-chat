@@ -1,9 +1,11 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
-use std::{io, net::TcpListener};
-use terminal_chat::{ADDRESS, Message};
+use std::{io, net::TcpListener, sync::mpsc};
+use terminal_chat::{ADDRESS, Message, StdinChannel};
 
 fn main() {
+    let stdin = StdinChannel::new();
+
     let listener = TcpListener::bind(ADDRESS).expect("failed to create server");
     listener
         .set_nonblocking(true)
@@ -13,6 +15,20 @@ fn main() {
 
     println!("awaiting client connect...");
     loop {
+        match stdin.try_recv() {
+            Ok(input) => match input.as_str() {
+                "ping" => println!("echo"),
+                _ => eprintln!("unknown command: {input}"),
+            },
+
+            Err(mpsc::TryRecvError::Disconnected) => {
+                println!("server disconnect");
+                break;
+            }
+
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+
         match listener.accept() {
             Err(e) => {
                 if e.kind() != io::ErrorKind::WouldBlock {
@@ -57,4 +73,5 @@ fn main() {
             i += 1;
         }
     }
+    println!("shutting down");
 }

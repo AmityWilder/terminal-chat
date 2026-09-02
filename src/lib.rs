@@ -3,6 +3,8 @@
 use std::{
     io::{self, Read, Write},
     net::{Ipv4Addr, SocketAddr, TcpStream},
+    sync::mpsc::{self, Receiver},
+    thread::{self, JoinHandle},
 };
 
 pub const ADDRESS: SocketAddr =
@@ -170,5 +172,61 @@ impl Message {
         stream.set_nonblocking(true)?; // now that the message is finished being read, we can go nonblocking again
 
         Ok(Some(Self { text, attachments }))
+    }
+}
+
+#[derive(Debug)]
+pub struct StdinChannel {
+    rcvr: Receiver<String>,
+    _thread: JoinHandle<()>,
+}
+
+impl std::ops::Deref for StdinChannel {
+    type Target = Receiver<String>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.rcvr
+    }
+}
+
+impl std::ops::DerefMut for StdinChannel {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.rcvr
+    }
+}
+
+impl StdinChannel {
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        let (sndr, rcvr) = mpsc::channel::<String>();
+        Self {
+            rcvr,
+            _thread: thread::Builder::new()
+                .name("stdin channel".to_string())
+                .spawn(move || {
+                    loop {
+                        let mut buffer = String::new();
+                        match io::stdin().read_line(&mut buffer) {
+                            Ok(0) => {
+                                println!("stdin closed");
+                                break;
+                            }
+                            Ok(_) => {
+                                while buffer.ends_with(['\n', '\r']) {
+                                    buffer.pop();
+                                }
+                                if let Err(e) = sndr.send(buffer) {
+                                    eprintln!("failed to send buffer: {e}");
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("failed to read stdin: {e}");
+                                break;
+                            }
+                        }
+                    }
+                })
+                .expect("failed to spawn thread"),
+        }
     }
 }
