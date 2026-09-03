@@ -158,7 +158,7 @@ fn main() {
                 } else {
                     if text.is_empty() {
                         incomplete_message.destination = curr_dest.clone();
-                        println!("sending message: {incomplete_message:?}");
+                        // println!("sending message: {incomplete_message:?}");
                         if let Err(e) =
                             Message::User(std::mem::take(&mut incomplete_message)).send(&mut stream)
                         {

@@ -127,22 +127,12 @@ impl WriteTo for UserMessage {
 
 impl ReadFrom for UserMessage {
     fn read_from<R: ?Sized + Read>(stream: &mut R) -> io::Result<Self> {
-        let sender = <Option<Identifier>>::read_from(stream)?;
-        println!("sender: {sender:?}");
-        let destination = Destination::read_from(stream)?;
-        println!("destination: {destination:?}");
-        let timestamp = SystemTime::read_from(stream)?;
-        println!("timestamp: {timestamp:?}");
-        let text = String::read_from::<_, 2>(stream)?;
-        println!("text: {text:?}");
-        let attachments = <Vec<Attachment>>::read_list::<_, 1>(stream)?;
-        println!("attachments: {attachments:?}");
         Ok(Self {
-            sender,
-            destination,
-            timestamp,
-            text,
-            attachments,
+            sender: <Option<Identifier>>::read_from(stream)?,
+            destination: Destination::read_from(stream)?,
+            timestamp: SystemTime::read_from(stream)?,
+            text: String::read_from::<_, 2>(stream)?,
+            attachments: <Vec<Attachment>>::read_list::<_, 1>(stream)?,
         })
     }
 }
@@ -521,7 +511,8 @@ impl Message {
         // indicate an incoming message
         socket.write_all(&[Self::INCOMING_MESSAGE_CODE])?;
 
-        println!("sending {} bytes: {buf:?}", buf.len());
+        // println!("sending {} bytes: {buf:?}", buf.len()); // debug
+
         // send the message through the socket
         buf.write_to::<_, 8>(socket)
     }
@@ -540,7 +531,7 @@ impl Message {
             Vec::read_from::<_, 8>(&mut *TempBlockingTkn::begin(socket)?)?
         }; // TempBlockingTkn goes out of scope and ends blocking
 
-        println!("received {} bytes: {buf:?}", buf.len());
+        // println!("received {} bytes: {buf:?}", buf.len()); // debug
 
         // reinterpret the buffer as a Message
         Self::read_from(&mut buf.as_slice()).map(Some)

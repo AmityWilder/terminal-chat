@@ -293,21 +293,16 @@ impl VarReadFrom for usize {
 impl VarReadFrom for Vec<u8> {
     fn read_from<R: ?Sized + Read, const N: usize>(stream: &mut R) -> io::Result<Self> {
         let len = usize::read_from::<_, N>(stream)?;
-        println!("len: {len}");
         let mut buf = vec![0; len];
         stream.read_exact(buf.as_mut_slice())?;
-        println!("buffer: {buf:?}");
         Ok(buf)
     }
 }
 
 impl VarReadFrom for String {
     fn read_from<R: ?Sized + Read, const N: usize>(stream: &mut R) -> io::Result<Self> {
-        Vec::<u8>::read_from::<_, N>(stream).and_then(|buf| {
-            String::from_utf8(buf)
-                .inspect(|s| println!("string: {s}"))
-                .map_err(io::Error::other)
-        })
+        Vec::<u8>::read_from::<_, N>(stream)
+            .and_then(|buf| String::from_utf8(buf).map_err(io::Error::other))
     }
 }
 

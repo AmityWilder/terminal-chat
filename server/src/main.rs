@@ -167,6 +167,7 @@ fn route_message(
                                 if entry.get() == &password {
                                     clients[sender_index].username = Some(username);
                                     println!("logged into existing user");
+                                    response!((Message::Server(ServerMessage::Success)) -> &mut clients[sender_index].socket);
                                 } else {
                                     println!("incorrect password");
                                     response!((Message::Server(ServerMessage::Error(MessageError::WrongPassword))) -> &mut clients[sender_index].socket);
@@ -176,6 +177,7 @@ fn route_message(
                                 entry.insert(password);
                                 clients[sender_index].username = Some(username);
                                 println!("logged into new user");
+                                response!((Message::Server(ServerMessage::Success)) -> &mut clients[sender_index].socket);
                             }
                         }
                     }
