@@ -37,7 +37,7 @@ fn display_message(msg: &UserMessage) {
 fn run_command(
     stream: &mut TcpStream,
     curr_dest: &mut Destination,
-    last_message_received: Option<&UserMessage>,
+    message_history: &[UserMessage],
     cmd: &str,
 ) {
     let (cmd, args) = cmd.split_at(cmd.find(' ').unwrap_or(cmd.len()));
@@ -53,6 +53,14 @@ fn run_command(
                     whitespace in chat names is not currently supported, \
                     so your messages might not be delivered"
                     );
+                }
+                if let Err(e) = Message::Server(ServerMessage::Get {
+                    source: curr_dest.clone(),
+                    range: (0, 10),
+                })
+                .send(stream)
+                {
+                    eprintln!("failed to request message history: {e}");
                 }
             }
 
@@ -88,7 +96,7 @@ fn run_command(
         }
 
         "save" => {
-            if let Some(message) = last_message_received
+            if let Some(message) = message_history.last()
                 && let Some(item) = message.attachments.iter().find(|x| x.filename == args)
             {
                 let path = Path::new(&item.filename);
@@ -140,21 +148,17 @@ fn main() {
 
     let mut curr_dest = Destination::default();
     let mut incomplete_message = UserMessage::default();
-    let mut last_message_received: Option<UserMessage> = None;
+    let mut message_history: Vec<UserMessage> = Vec::new();
 
     loop {
         match stdin.try_recv() {
             Ok(text) => {
                 if let Some(cmd) = text.strip_prefix('/') {
-                    run_command(
-                        &mut stream,
-                        &mut curr_dest,
-                        last_message_received.as_ref(),
-                        cmd,
-                    );
+                    run_command(&mut stream, &mut curr_dest, &message_history, cmd);
                 } else {
                     if text.is_empty() {
                         incomplete_message.destination = curr_dest.clone();
+                        println!("sending message: {incomplete_message:?}");
                         if let Err(e) =
                             Message::User(std::mem::take(&mut incomplete_message)).send(&mut stream)
                         {
@@ -214,16 +218,23 @@ fn main() {
             Ok(Some(msg)) => match msg {
                 Message::User(umsg) => {
                     display_message(&umsg);
-                    last_message_received = Some(umsg);
+                    message_history.push(umsg);
                 }
 
                 Message::Server(smsg) => match smsg {
                     ServerMessage::Acknowledge => println!("\x1b[90macknowledged\x1b[0m"),
                     ServerMessage::Success => println!("\x1b[94msuccess\x1b[0m"),
                     ServerMessage::Error(e) => println!("\x1b[91merror: {e}\x1b[0m"),
-                    ServerMessage::CreateChat { .. } | ServerMessage::Login { .. } => {
-                        eprintln!("\x1b[90m[unintended]\x1b[0m")
+                    ServerMessage::GetResponse(list) => {
+                        message_history = list;
+                        for msg in &message_history {
+                            display_message(msg);
+                        }
                     }
+
+                    ServerMessage::CreateChat { .. }
+                    | ServerMessage::Login { .. }
+                    | ServerMessage::Get { .. } => eprintln!("\x1b[90m[unintended]\x1b[0m"),
                 },
             },
         }

@@ -127,12 +127,22 @@ impl WriteTo for UserMessage {
 
 impl ReadFrom for UserMessage {
     fn read_from<R: ?Sized + Read>(stream: &mut R) -> io::Result<Self> {
+        let sender = <Option<Identifier>>::read_from(stream)?;
+        println!("sender: {sender:?}");
+        let destination = Destination::read_from(stream)?;
+        println!("destination: {destination:?}");
+        let timestamp = SystemTime::read_from(stream)?;
+        println!("timestamp: {timestamp:?}");
+        let text = String::read_from::<_, 2>(stream)?;
+        println!("text: {text:?}");
+        let attachments = <Vec<Attachment>>::read_list::<_, 1>(stream)?;
+        println!("attachments: {attachments:?}");
         Ok(Self {
-            sender: Option::read_from(stream)?,
-            destination: Destination::read_from(stream)?,
-            timestamp: SystemTime::read_from(stream)?,
-            text: String::read_from::<_, 2>(stream)?,
-            attachments: Vec::read_list::<_, 1>(stream)?,
+            sender,
+            destination,
+            timestamp,
+            text,
+            attachments,
         })
     }
 }
@@ -155,6 +165,8 @@ pub enum MessageError {
     ChatTaken,
     WrongPassword,
     BadUsername,
+    SelfSend,
+    MsgNexists,
 }
 
 impl WriteTo for MessageError {
@@ -164,6 +176,8 @@ impl WriteTo for MessageError {
             Self::ChatTaken => 1u8,
             Self::WrongPassword => 2u8,
             Self::BadUsername => 3u8,
+            Self::SelfSend => 4u8,
+            Self::MsgNexists => 5u8,
         }
         .write_to(stream)
     }
@@ -176,6 +190,8 @@ impl ReadFrom for MessageError {
             1 => Ok(Self::ChatTaken),
             2 => Ok(Self::WrongPassword),
             3 => Ok(Self::BadUsername),
+            4 => Ok(Self::SelfSend),
+            5 => Ok(Self::MsgNexists),
 
             x => Err(io::Error::other(UnknownVariantError(x))),
         }
@@ -195,6 +211,8 @@ impl std::fmt::Display for MessageError {
             ),
             Self::WrongPassword => write!(f, "incorrect password, try again"),
             Self::BadUsername => write!(f, "usernames may only contain a-z, A-Z, 0-9, and _"),
+            Self::SelfSend => write!(f, "cannot send messages to yourself"),
+            Self::MsgNexists => write!(f, "requested message(s) that do(es) not exist"),
         }
     }
 }
@@ -356,6 +374,11 @@ pub enum ServerMessage {
         /// the only security it provides rn is that other clients don't have to know it to message you.
         password: String,
     },
+    Get {
+        source: Destination,
+        range: (usize, usize),
+    },
+    GetResponse(Vec<UserMessage>),
 }
 
 impl WriteTo for ServerMessage {
@@ -366,6 +389,8 @@ impl WriteTo for ServerMessage {
             Self::Error(_) => 2u8,
             Self::CreateChat { .. } => 3u8,
             Self::Login { .. } => 4u8,
+            Self::Get { .. } => 5u8,
+            Self::GetResponse(_) => 6u8,
         }
         .write_to(stream)?;
         match self {
@@ -382,6 +407,12 @@ impl WriteTo for ServerMessage {
                 username.write_to::<_, 1>(stream)?;
                 password.write_to::<_, 1>(stream)
             }
+            Self::Get { source, range } => {
+                source.write_to(stream)?;
+                range.0.write_to::<_, 4>(stream)?;
+                range.1.write_to::<_, 4>(stream)
+            }
+            Self::GetResponse(messages) => messages.iter().write_list::<_, 4>(stream),
         }
     }
 }
@@ -400,6 +431,14 @@ impl ReadFrom for ServerMessage {
                 username: String::read_from::<_, 1>(stream)?,
                 password: String::read_from::<_, 1>(stream)?,
             }),
+            5 => Ok(Self::Get {
+                source: Destination::read_from(stream)?,
+                range: (
+                    usize::read_from::<_, 4>(stream)?,
+                    usize::read_from::<_, 4>(stream)?,
+                ),
+            }),
+            6 => Vec::read_list::<_, 4>(stream).map(Self::GetResponse),
 
             x => Err(io::Error::other(UnknownVariantError(x))),
         }
@@ -482,22 +521,26 @@ impl Message {
         // indicate an incoming message
         socket.write_all(&[Self::INCOMING_MESSAGE_CODE])?;
 
+        println!("sending {} bytes: {buf:?}", buf.len());
         // send the message through the socket
         buf.write_to::<_, 8>(socket)
     }
 
     pub fn recv(socket: &mut TcpStream) -> io::Result<Option<Self>> {
-        let mut msg_type = 0;
+        let mut byte = 0;
 
         // is a message incoming?
-        if socket.read(std::slice::from_mut(&mut msg_type))? == 0 {
+        if socket.read(std::slice::from_mut(&mut byte))? == 0 {
             return Ok(None); // no message
         }
+        assert_eq!(byte, Self::INCOMING_MESSAGE_CODE, "desynchronized");
 
         let buf: Vec<u8> = {
             // read the entire message into a buffer, so we don't get desynced if there are errors
             Vec::read_from::<_, 8>(&mut *TempBlockingTkn::begin(socket)?)?
         }; // TempBlockingTkn goes out of scope and ends blocking
+
+        println!("received {} bytes: {buf:?}", buf.len());
 
         // reinterpret the buffer as a Message
         Self::read_from(&mut buf.as_slice()).map(Some)

@@ -69,7 +69,8 @@ impl WriteTo for i128 {
 
 impl WriteTo for std::time::Duration {
     fn write_to<W: ?Sized + Write>(&self, stream: &mut W) -> io::Result<()> {
-        self.as_millis().write_to(stream)
+        // WHY IS THIS A DIFFERENT TYPE?!
+        (self.as_millis() as u64).write_to(stream)
     }
 }
 impl WriteTo for std::time::SystemTime {
@@ -125,7 +126,7 @@ impl VarWriteTo for [u8] {
 
 impl VarWriteTo for str {
     fn write_to<W: ?Sized + Write, const N: usize>(&self, stream: &mut W) -> io::Result<()> {
-        self.as_bytes().write_to::<W, N>(stream)
+        self.as_bytes().write_to::<_, N>(stream)
     }
 }
 
@@ -284,25 +285,29 @@ impl VarReadFrom for usize {
         }
         let mut len_bytes = [0; _];
         stream.read_exact(&mut len_bytes[..N])?;
-        Ok(usize::from_le_bytes(len_bytes))
+        let n = usize::from_le_bytes(len_bytes);
+        Ok(n)
     }
 }
 
 impl VarReadFrom for Vec<u8> {
-    /// You should clear `self` yourself if it isn't empty
     fn read_from<R: ?Sized + Read, const N: usize>(stream: &mut R) -> io::Result<Self> {
         let len = usize::read_from::<_, N>(stream)?;
+        println!("len: {len}");
         let mut buf = vec![0; len];
         stream.read_exact(buf.as_mut_slice())?;
+        println!("buffer: {buf:?}");
         Ok(buf)
     }
 }
 
 impl VarReadFrom for String {
-    /// Will allocate a fresh buffer
     fn read_from<R: ?Sized + Read, const N: usize>(stream: &mut R) -> io::Result<Self> {
-        Vec::read_from::<R, N>(stream)
-            .and_then(|buf| String::from_utf8(buf).map_err(io::Error::other))
+        Vec::<u8>::read_from::<_, N>(stream).and_then(|buf| {
+            String::from_utf8(buf)
+                .inspect(|s| println!("string: {s}"))
+                .map_err(io::Error::other)
+        })
     }
 }
 

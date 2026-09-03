@@ -52,10 +52,24 @@ fn send_message_to_client(msg: &Message, clients: &mut [Client], recipient: &Ide
     }
 }
 
+/// Direct message stream ID (user pair)
+fn dmid(sndr: Identifier, rcvr: Identifier) -> Result<[Identifier; 2], MessageError> {
+    match sndr.cmp(&rcvr) {
+        std::cmp::Ordering::Less => Ok([sndr.clone(), rcvr.clone()]),
+        std::cmp::Ordering::Greater => Ok([rcvr.clone(), sndr.clone()]),
+
+        std::cmp::Ordering::Equal => {
+            eprintln!("cannot deliver to self");
+            Err(MessageError::SelfSend)
+        }
+    }
+}
+
 fn route_message(
     clients: &mut [Client],
     users: &mut HashMap<String, String>,
-    chats: &mut HashMap<String, BTreeSet<Identifier>>,
+    chats: &mut HashMap<String, Chat>,
+    dm_history: &mut HashMap<[Identifier; 2], MessageHistory>,
     sender_index: usize,
     msg: Message,
 ) {
@@ -68,10 +82,11 @@ fn route_message(
                 attachment.filename = attachment.filename.replace(char::is_whitespace, "_");
             }
             match &umsg.destination {
-                Destination::Chat(chat) => match chats.get(chat) {
-                    Some(members) => {
+                Destination::Chat(chat) => match chats.get_mut(chat) {
+                    Some(Chat { members, messages }) => {
+                        messages.push(umsg.clone());
+                        println!("distributing message:\n```\n{umsg:?}\n```");
                         let msg = Message::User(umsg);
-                        println!("distributing message:\n```\n{msg:?}\n```");
                         for member in members.iter() {
                             if clients[sender_index].matches(member) {
                                 continue; // dont echo back to original sender. they know what they wrote.
@@ -87,9 +102,19 @@ fn route_message(
                 },
 
                 Destination::Client(identifier) => {
-                    let identifier = identifier.clone();
-                    let msg = Message::User(umsg);
-                    send_message_to_client(&msg, clients, &identifier)
+                    match dmid(clients[sender_index].identifier(), identifier.clone()) {
+                        Err(e) => {
+                            eprintln!("could not get user pair: {e}");
+                            response!((Message::Server(ServerMessage::Error(e))) -> &mut clients[sender_index].socket);
+                        }
+
+                        Ok(user_pair) => {
+                            let identifier = identifier.clone(); // identifier is a partial borrow of umsg
+                            dm_history.entry(user_pair).or_default().push(umsg.clone());
+                            println!("sending direct message message:\n```\n{umsg:?}\n```");
+                            send_message_to_client(&Message::User(umsg), clients, &identifier)
+                        }
+                    }
                 }
             }
         }
@@ -122,7 +147,10 @@ fn route_message(
                                     .map(|s| Identifier::User(s.clone()))
                                     .unwrap_or(Identifier::Socket(clients[sender_index].addr)),
                             );
-                            entry.insert(members);
+                            entry.insert(Chat {
+                                members,
+                                messages: Vec::new(),
+                            });
                             println!("chat created");
                             response!((Message::Server(ServerMessage::Success)) -> &mut clients[sender_index].socket);
                         }
@@ -152,9 +180,54 @@ fn route_message(
                         }
                     }
                 }
+
+                ServerMessage::Get {
+                    source,
+                    range: (start, end),
+                } => {
+                    let history = match source {
+                        Destination::Chat(chat) => chats.get(&chat).map(|chat| &chat.messages),
+
+                        Destination::Client(identifier) => {
+                            match dmid(clients[sender_index].identifier(), identifier.clone()) {
+                                Err(e) => {
+                                    eprintln!("could not get user pair: {e}");
+                                    response!((Message::Server(ServerMessage::Error(e))) -> &mut clients[sender_index].socket);
+                                    return;
+                                }
+
+                                Ok(user_pair) => dm_history.get(&user_pair),
+                            }
+                        }
+                    };
+                    if let Some(history) = history {
+                        let messages = history
+                            .iter()
+                            .rev()
+                            .skip(start)
+                            .take(end.saturating_sub(start))
+                            .cloned()
+                            .collect();
+                        response!((Message::Server(ServerMessage::GetResponse(messages))) -> &mut clients[sender_index].socket);
+                    } else {
+                        response!((Message::Server(ServerMessage::Error(MessageError::DstNexists))) -> &mut clients[sender_index].socket);
+                    }
+                }
+
+                ServerMessage::GetResponse(_) => {
+                    eprintln!("invlalid: server did not request messages");
+                }
             }
         }
     }
+}
+
+type MessageHistory = Vec<UserMessage>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+struct Chat {
+    pub members: BTreeSet<Identifier>,
+    pub messages: MessageHistory,
 }
 
 fn main() {
@@ -168,7 +241,9 @@ fn main() {
     let mut clients = Vec::new();
     let mut users = HashMap::<String, String>::new();
     // TODO: chats should probably have some way of locking out non-members
-    let mut chats = HashMap::<String, BTreeSet<Identifier>>::new();
+    let mut chats = HashMap::<String, Chat>::new();
+    // dm identifiers are ordered
+    let mut dm_history = HashMap::<[Identifier; 2], MessageHistory>::new();
 
     println!("awaiting client connect...");
     loop {
@@ -223,7 +298,14 @@ fn main() {
                     continue; // `i` now refers to a different client
                 }
 
-                Ok(Some(msg)) => route_message(&mut clients, &mut users, &mut chats, i, msg),
+                Ok(Some(msg)) => route_message(
+                    &mut clients,
+                    &mut users,
+                    &mut chats,
+                    &mut dm_history,
+                    i,
+                    msg,
+                ),
             }
             i += 1;
         }
