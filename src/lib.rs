@@ -67,11 +67,11 @@ macro_rules! write_int_narrowed {
 }
 
 macro_rules! write_int_ranged {
-    (($Int:ty) [$range:expr] $error:literal ($value:expr) -> $stream:expr) => {
-        if $range.contains(&$value) {
+    (($Int:ty) [..=$max:expr] $error:literal ($value:expr) -> $stream:expr) => {
+        if $value <= $max {
             write_int_narrowed!(($Int) ($value) -> $stream)
         } else {
-            Err(io::Error::other($error))
+            Err(io::Error::other(format!("{} ({} / {})", $error, $value, $max)))
         }
     };
 }
@@ -118,8 +118,8 @@ portable_size! {
 }
 
 portable_size! {
-    pub AttachmentSize = u16;
-    pub MAX_ATTACHMENT_BYTES = 2048;
+    pub AttachmentSize = u32;
+    pub MAX_ATTACHMENT_BYTES = 20_971_520; // 20Mb
 }
 
 /// Arbitrary data that can be sent alongside a message.
@@ -140,18 +140,41 @@ impl Attachment {
     pub fn new(path: &Path, alt_text: String) -> io::Result<Self> {
         if path.is_file() {
             let data = std::fs::read(path)?;
+            let filename = path
+                .file_name()
+                .expect("file cannot terminate in `..`")
+                .to_string_lossy()
+                .to_string();
+            println!("shortened filename: `{filename}`");
             Ok(Self {
-                filename: path
-                    .file_name()
-                    .expect("file cannot terminate in `..`")
-                    .to_string_lossy()
-                    .to_string(),
+                filename,
                 alt_text,
                 data,
             })
         } else {
             Err(io::Error::other("no such file"))
         }
+    }
+
+    fn write_to<W: Write>(&self, mut stream: W) -> io::Result<()> {
+        write_int_ranged!((FilenameLen) [..=MAX_FILENAME_BYTES] "filename too long" (self.filename.len()) -> stream)?;
+        write_int_ranged!((AltTextLen) [..=MAX_ALT_TEXT_BYTES] "alt text too long" (self.alt_text.len()) -> stream)?;
+        write_int_ranged!((AttachmentSize) [..=MAX_ATTACHMENT_BYTES] "attachment too large" (self.data.len()) -> stream)?;
+        stream.write_all(self.filename.as_bytes())?;
+        stream.write_all(self.alt_text.as_bytes())?;
+        stream.write_all(self.data.as_slice())?;
+        Ok(())
+    }
+
+    fn read_from<R: Read>(mut stream: R) -> io::Result<Self> {
+        let filename_len = read_int!((FilenameLen) stream)?;
+        let alt_len = read_int!((AltTextLen) stream)?;
+        let attachment_size = read_int!((AttachmentSize) stream)?;
+        Ok(Attachment {
+            filename: read_string!([filename_len as usize] stream)?,
+            alt_text: read_string!([alt_len as usize] stream)?,
+            data: read_vec!([attachment_size as usize] stream)?,
+        })
     }
 }
 
@@ -233,11 +256,7 @@ impl UserMessage {
         write_timestamp!((SystemTime::now()) -> stream)?;
         stream.write_all(self.text.as_bytes())?;
         for attachment in &self.attachments {
-            write_int_ranged!((FilenameLen) [..=MAX_FILENAME_BYTES] "filename too long" (attachment.filename.len()) -> stream)?;
-            write_int_ranged!((AltTextLen) [..=MAX_ALT_TEXT_BYTES] "alt text too long" (attachment.alt_text.len()) -> stream)?;
-            write_int_ranged!((AttachmentSize) [..=MAX_ATTACHMENT_BYTES] "attachment too large" (attachment.data.len()) -> stream)?;
-            stream.write_all(attachment.alt_text.as_bytes())?;
-            stream.write_all(attachment.data.as_slice())?;
+            attachment.write_to(&mut stream)?;
         }
         Ok(())
     }
@@ -251,21 +270,9 @@ impl UserMessage {
         let destination = read_string!([destination_len as usize] stream)?;
         let timestamp = read_timestamp!(stream)?;
         let text = read_string!([text_len as usize] stream)?;
-        let attachments = std::iter::repeat_with(|| {
-            let filename_len = read_int!((FilenameLen) stream)?;
-            let alt_len = read_int!((AltTextLen) stream)?;
-            let attachment_size = read_int!((AttachmentSize) stream)?;
-            let file_name = read_string!([filename_len as usize] stream)?;
-            let alt_text = read_string!([alt_len as usize] stream)?;
-            let data = read_vec!([attachment_size as usize] stream)?;
-            Ok(Attachment {
-                filename: file_name,
-                alt_text,
-                data,
-            })
-        })
-        .take(attachment_count as usize)
-        .collect::<io::Result<Vec<_>>>()?;
+        let attachments = std::iter::repeat_with(|| Attachment::read_from(&mut stream))
+            .take(attachment_count as usize)
+            .collect::<io::Result<Vec<_>>>()?;
 
         Ok(Self {
             sender,

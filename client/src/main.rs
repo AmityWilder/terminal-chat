@@ -1,7 +1,15 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
-use std::{io, net::TcpStream, sync::mpsc, time::SystemTime};
-use terminal_chat::{ADDRESS, Message, ServerMessage, StdinChannel, UserMessage};
+use std::{
+    io::{self, Write},
+    net::TcpStream,
+    path::Path,
+    sync::mpsc,
+    time::SystemTime,
+};
+use terminal_chat::{
+    ADDRESS, Attachment, MAX_ATTACHMENTS, Message, ServerMessage, StdinChannel, UserMessage,
+};
 
 fn display_message(msg: &UserMessage) {
     print!(
@@ -9,17 +17,94 @@ fn display_message(msg: &UserMessage) {
         msg.sender
             .map(|x| x.to_string())
             .unwrap_or("[null]".to_string()),
-        &msg.destination
+        msg.destination
     );
     match msg.timestamp.duration_since(SystemTime::UNIX_EPOCH) {
         Ok(dur) => print!("{}ms since unix epoch", dur.as_millis()),
         Err(e) => print!("\x1b[91m{e}"),
     }
     println!("\x1b[90m:\x1b[0m\n{}", msg.text);
-    for image in &msg.attachments {
-        println!("image: {}", image.alt_text);
+    println!("\x1b[90mattachments:\x1b[94m");
+    for attachment in &msg.attachments {
+        println!("- [{}]({})", attachment.alt_text, attachment.filename);
     }
     println!("\x1b[90m------\x1b[0m")
+}
+
+fn run_command(
+    stream: &mut TcpStream,
+    curr_dest: &mut String,
+    last_message_received: Option<&UserMessage>,
+    cmd: &str,
+) {
+    let (cmd, args) = cmd.split_at(cmd.find(' ').unwrap_or(cmd.len()));
+    let args = args.trim();
+    match cmd {
+        "setchat" => {
+            println!("future messages will be delivered to to `{args}`");
+            if args.contains(|ch: char| ch.is_whitespace()) {
+                eprintln!(
+                    "warning: `{args}` contains whitespace characters.
+                                    whitespace in chat names is not currently supported,
+                                    so your messages might not be delivered"
+                );
+            }
+            curr_dest.clear();
+            curr_dest.push_str(args);
+        }
+
+        "newchat" => {
+            let mut it = args.split_whitespace();
+            match it.next().map(str::to_string) {
+                None => eprintln!("missing destination"),
+
+                Some(destination) => match it.map(|x| x.parse()).collect::<Result<_, _>>() {
+                    Err(e) => eprintln!("failed to parse member (expecting SocketAddr): {e}"),
+
+                    Ok(members) => {
+                        println!("auto-switching current chat to `{destination}`");
+                        curr_dest.clear();
+                        curr_dest.push_str(&destination);
+
+                        let message = Message::Server(ServerMessage::CreateChat {
+                            destination,
+                            members,
+                        });
+
+                        if let Err(e) = message.write_to(stream) {
+                            eprintln!("failed to send message: {e}");
+                        }
+                    }
+                },
+            }
+        }
+
+        "save" => {
+            if let Some(message) = last_message_received
+                && let Some(item) = message.attachments.iter().find(|x| x.filename == args)
+            {
+                let path = Path::new(&item.filename);
+                match std::fs::File::create_new(path) {
+                    Ok(mut file) => match file.write_all(&item.data) {
+                        Ok(()) => {
+                            println!("\x1b[90msaved \x1b[94m`{}`\x1b[0m", path.display());
+                        }
+                        Err(e) => eprintln!("failed to store data: {e}"),
+                    },
+                    Err(e) => {
+                        eprintln!(
+                            "failed to create file `{}`: {e}",
+                            std::env::current_dir().unwrap().join(path).display()
+                        )
+                    }
+                }
+            } else {
+                eprintln!("no such attachment");
+            }
+        }
+
+        _ => eprintln!("unknown command: {cmd}"),
+    }
 }
 
 fn main() {
@@ -31,66 +116,48 @@ fn main() {
         .expect("cannot set nonblocking");
 
     let mut curr_dest = String::new();
+    let mut incomplete_message = UserMessage::default();
+    let mut last_message_received: Option<UserMessage> = None;
 
     loop {
         match stdin.try_recv() {
             Ok(text) => {
                 if let Some(cmd) = text.strip_prefix('/') {
-                    let (cmd, args) = cmd.split_at(cmd.find(' ').unwrap_or(cmd.len()));
-                    let args = args.trim();
-                    match cmd {
-                        "setchat" => {
-                            println!("future messages will be delivered to to `{args}`");
-                            if args.contains(|ch: char| ch.is_whitespace()) {
+                    run_command(
+                        &mut stream,
+                        &mut curr_dest,
+                        last_message_received.as_ref(),
+                        cmd,
+                    );
+                } else {
+                    if text.is_empty() {
+                        incomplete_message.destination = curr_dest.clone();
+                        if let Err(e) = Message::User(std::mem::take(&mut incomplete_message))
+                            .write_to(&mut stream)
+                        {
+                            eprintln!("failed to send message: {e}");
+                        }
+                    } else if incomplete_message.text.is_empty() {
+                        incomplete_message.text = text;
+                    } else {
+                        if incomplete_message.attachments.len() < MAX_ATTACHMENTS {
+                            if let Some((alt_text, path_str)) = text
+                                .strip_prefix('[')
+                                .and_then(|x| x.strip_suffix("\")"))
+                                .and_then(|x| x.split_once("](\""))
+                            {
+                                match Attachment::new(Path::new(path_str), alt_text.to_string()) {
+                                    Ok(attachment) => {
+                                        incomplete_message.attachments.push(attachment)
+                                    }
+                                    Err(e) => eprintln!("invalid attachment: {e}"),
+                                }
+                            } else {
                                 eprintln!(
-                                    "warning: `{args}` contains whitespace characters.
-                                    whitespace in chat names is not currently supported,
-                                    so your messages might not be delivered"
+                                    "malformed attachment, expected [\x1b[90malt text\x1b[0m](\x1b[90mfile path\x1b[0m)"
                                 );
                             }
-                            curr_dest.clear();
-                            curr_dest.push_str(args);
                         }
-
-                        "newchat" => {
-                            let mut it = args.split_whitespace();
-                            match it.next().map(str::to_string) {
-                                None => eprintln!("missing destination"),
-
-                                Some(destination) => {
-                                    match it.map(|x| x.parse()).collect::<Result<_, _>>() {
-                                        Err(e) => eprintln!(
-                                            "failed to parse member (expecting SocketAddr): {e}"
-                                        ),
-
-                                        Ok(members) => {
-                                            println!(
-                                                "auto-switching current chat to `{destination}`"
-                                            );
-                                            curr_dest.clear();
-                                            curr_dest.push_str(&destination);
-
-                                            let message =
-                                                Message::Server(ServerMessage::CreateChat {
-                                                    destination,
-                                                    members,
-                                                });
-
-                                            if let Err(e) = message.write_to(&mut stream) {
-                                                eprintln!("failed to send message: {e}");
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        _ => eprintln!("unknown command: {cmd}"),
-                    }
-                } else {
-                    let msg = Message::User(UserMessage::new(curr_dest.clone(), text, Vec::new()));
-                    if let Err(e) = msg.write_to(&mut stream) {
-                        eprintln!("failed to send message: {e}");
                     }
                 }
             }
@@ -122,19 +189,17 @@ fn main() {
                 break;
             }
             Ok(Some(msg)) => match msg {
-                Message::User(umsg) => display_message(&umsg),
-                Message::Server(smsg) => {
-                    // print!("server response: ");
-                    match smsg {
-                        ServerMessage::Acknowledge => println!("\x1b[90macknowledged\x1b[0m"),
-                        ServerMessage::Success => println!("\x1b[94msuccess\x1b[0m"),
-                        ServerMessage::Error(e) => println!("\x1b[91merror: {e}\x1b[0m"),
-
-                        ServerMessage::CreateChat { .. } => {
-                            eprintln!("\x1b[90m[unintended recipient]\x1b[0m")
-                        }
-                    }
+                Message::User(umsg) => {
+                    display_message(&umsg);
+                    last_message_received = Some(umsg);
                 }
+
+                Message::Server(smsg) => match smsg {
+                    ServerMessage::Acknowledge => println!("\x1b[90macknowledged\x1b[0m"),
+                    ServerMessage::Success => println!("\x1b[94msuccess\x1b[0m"),
+                    ServerMessage::Error(e) => println!("\x1b[91merror: {e}\x1b[0m"),
+                    ServerMessage::CreateChat { .. } => eprintln!("\x1b[90m[unintended]\x1b[0m"),
+                },
             },
         }
     }

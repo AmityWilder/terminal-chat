@@ -35,6 +35,10 @@ fn route_message(
             response!((Message::Server(ServerMessage::Acknowledge)) -> &mut clients[sender_index].socket);
             let sender = clients[sender_index].addr;
             umsg.sender = Some(sender);
+            // sanitization
+            for attachment in &mut umsg.attachments {
+                attachment.filename = attachment.filename.replace(char::is_whitespace, "_");
+            }
             let destination = &umsg.destination;
             match chats.get(destination) {
                 Some(members) => {
@@ -146,6 +150,9 @@ fn main() {
                             "failed to read message from client {}: {e}",
                             clients[i].addr
                         );
+                        println!("disconnecting client {}", clients[i].addr);
+                        clients.swap_remove(i);
+                        continue; // `i` now refers to a different client
                     }
                 }
 
