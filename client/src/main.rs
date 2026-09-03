@@ -7,10 +7,7 @@ use std::{
     sync::mpsc,
     time::SystemTime,
 };
-use terminal_chat::{
-    ADDRESS, Attachment, Identifier, MAX_ATTACHMENTS, Message, ServerMessage, StdinChannel,
-    UserMessage,
-};
+use terminal_chat::*;
 
 fn display_message(msg: &UserMessage) {
     print!("\x1b[90mfrom ");
@@ -21,7 +18,10 @@ fn display_message(msg: &UserMessage) {
         },
         None => print!("\x1b[30m[null]"),
     }
-    print!("\x1b[90m in \x1b[94m{}\x1b[90m at ", msg.destination);
+    if let Destination::Chat(chat) = &msg.destination {
+        print!("\x1b[90m in \x1b[94m{chat}");
+    }
+    print!("\x1b[90m at ");
     match msg.timestamp.duration_since(SystemTime::UNIX_EPOCH) {
         Ok(dur) => print!("{}ms since unix epoch", dur.as_millis()),
         Err(e) => print!("\x1b[91m{e}"),
@@ -36,25 +36,28 @@ fn display_message(msg: &UserMessage) {
 
 fn run_command(
     stream: &mut TcpStream,
-    curr_dest: &mut String,
+    curr_dest: &mut Destination,
     last_message_received: Option<&UserMessage>,
     cmd: &str,
 ) {
     let (cmd, args) = cmd.split_at(cmd.find(' ').unwrap_or(cmd.len()));
     let args = args.trim();
     match cmd {
-        "setchat" => {
-            println!("future messages will be delivered to to `{args}`");
-            if args.contains(|ch: char| ch.is_whitespace()) {
-                eprintln!(
-                    "warning: `{args}` contains whitespace characters.
-                                    whitespace in chat names is not currently supported,
-                                    so your messages might not be delivered"
-                );
+        "setchat" => match args.parse() {
+            Ok(dest) => {
+                *curr_dest = dest;
+                println!("future messages will be delivered to to `{args}`");
+                if args.contains(|ch: char| ch.is_whitespace()) {
+                    eprintln!(
+                        "warning: `{args}` contains whitespace characters. \
+                    whitespace in chat names is not currently supported, \
+                    so your messages might not be delivered"
+                    );
+                }
             }
-            curr_dest.clear();
-            curr_dest.push_str(args);
-        }
+
+            Err(e) => eprintln!("invalid chat name: {e}"),
+        },
 
         "newchat" => {
             let mut it = args.split_whitespace();
@@ -69,15 +72,14 @@ fn run_command(
 
                     Ok(members) => {
                         println!("auto-switching current chat to `{destination}`");
-                        curr_dest.clear();
-                        curr_dest.push_str(&destination);
+                        *curr_dest = Destination::Chat(destination.clone());
 
                         let message = Message::Server(ServerMessage::CreateChat {
                             destination,
                             members,
                         });
 
-                        if let Err(e) = message.write_to(stream) {
+                        if let Err(e) = message.send(stream) {
                             eprintln!("failed to send message: {e}");
                         }
                     }
@@ -116,7 +118,7 @@ fn run_command(
                     password: password.trim().to_string(),
                 });
 
-                if let Err(e) = message.write_to(stream) {
+                if let Err(e) = message.send(stream) {
                     eprintln!("failed to send message: {e}");
                 }
             } else {
@@ -136,7 +138,7 @@ fn main() {
         .set_nonblocking(true)
         .expect("cannot set nonblocking");
 
-    let mut curr_dest = String::new();
+    let mut curr_dest = Destination::default();
     let mut incomplete_message = UserMessage::default();
     let mut last_message_received: Option<UserMessage> = None;
 
@@ -153,8 +155,8 @@ fn main() {
                 } else {
                     if text.is_empty() {
                         incomplete_message.destination = curr_dest.clone();
-                        if let Err(e) = Message::User(std::mem::take(&mut incomplete_message))
-                            .write_to(&mut stream)
+                        if let Err(e) =
+                            Message::User(std::mem::take(&mut incomplete_message)).send(&mut stream)
                         {
                             eprintln!("failed to send message: {e}");
                         }
@@ -191,7 +193,7 @@ fn main() {
             Err(mpsc::TryRecvError::Empty) => {}
         }
 
-        match Message::read_from(&mut stream) {
+        match Message::recv(&mut stream) {
             Err(e) => {
                 if e.kind() != io::ErrorKind::WouldBlock {
                     eprintln!("failed to read message from server: {e}");

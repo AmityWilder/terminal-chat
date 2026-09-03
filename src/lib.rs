@@ -1,5 +1,16 @@
+//! NOTE TO SELF: Never trust the client to do something, except to the ends that it is necessary for function.
+//! The client can be trusted to connect and send text data & attachments.
+//! It can be "trusted" (it may fail, but it doesn't need to be sheilded) to send data following the proper format.
+//! However everything else has the potential to be modded by the end user.
+//!
+//! This library is used by both the client and the server.
+//! It is in the best interest of a client to use it, however there is no GUARANTEE they will.
+//! Thus, security features CANNOT be exclusively here. The server much verify and sanitize everything sent by a client.
+//! Just because a type's "WriteTo" implementation checks for validity does NOT mean data will be valid when it reaches the server.
+
 #![warn(clippy::undocumented_unsafe_blocks)]
 
+use crate::serde::*;
 use std::{
     collections::BTreeSet,
     io::{self, Read, Write},
@@ -7,109 +18,14 @@ use std::{
     path::Path,
     sync::mpsc::{self, Receiver},
     thread::{self, JoinHandle},
-    time::{Duration, SystemTime},
+    time::SystemTime,
 };
+
+mod serde;
 
 pub const ADDRESS: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
 
-macro_rules! read_int {
-    (($Int:ty) $stream:expr) => {{
-        let mut value = [0; _];
-        $stream
-            .read_exact(&mut value)
-            .map(|()| <$Int>::from_le_bytes(value))
-    }};
-}
-
-macro_rules! read_timestamp {
-    ($stream:expr) => {{
-        read_int!((u64) $stream).map(|ms| SystemTime::UNIX_EPOCH + Duration::from_millis(ms))
-    }};
-}
-
-macro_rules! read_vec {
-    ([$len:expr] $stream:expr) => {{
-        let mut data = vec![Default::default(); $len];
-        $stream.read_exact(&mut data).map(|()| data)
-    }};
-}
-
-macro_rules! read_string {
-    ([$len:expr] $stream:expr) => {{
-        read_vec!([$len] $stream)
-            .and_then(|data| String::from_utf8(data).map_err(io::Error::other))
-    }};
-}
-
-macro_rules! write_int {
-    (($value:expr) -> $stream:expr) => {
-        $stream.write_all(&$value.to_le_bytes())
-    };
-}
-
-macro_rules! write_int_narrowed {
-    (($Int:ty) ($value:expr) -> $stream:expr) => {
-        <$Int>::try_from($value)
-            .map_err(io::Error::other)
-            .and_then(|n| write_int!((n) -> $stream))
-    };
-}
-
-macro_rules! write_int_ranged {
-    (($Int:ty) [..=$max:expr] $error:literal ($value:expr) -> $stream:expr) => {
-        if $value <= $max {
-            write_int_narrowed!(($Int) ($value) -> $stream)
-        } else {
-            Err(io::Error::other(format!("{} ({} / {})", $error, $value, $max)))
-        }
-    };
-}
-
-macro_rules! write_timestamp {
-    (($value:expr) -> $stream:expr) => {
-        $value
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_err(io::Error::other)
-            .and_then(|dur| write_int_narrowed!((u64) (dur.as_millis()) -> $stream))
-    };
-}
-
-macro_rules! portable_size {
-    (
-        $(#[$typedoc:meta])*
-        $typevis:vis $Type:ident = $Repr:ty;
-        $(#[$maxdoc:meta])*
-        $maxvis:vis $MAX:ident = $amount:expr;
-    ) => {
-        /// Portable type for streaming size data
-        $(#[$typedoc])*
-        $typevis type $Type = $Repr;
-        /// Maximum allowable data (for buffer sizing)
-        $(#[$maxdoc])*
-        $maxvis const $MAX: usize = $amount;
-        const _: () = {
-            assert!(
-                $MAX.ilog2() <= $Type::BITS,
-                "limit must fit in type"
-            );
-        };
-    };
-}
-
-portable_size! {
-    pub AltTextLen = u16;
-    pub MAX_ALT_TEXT_BYTES = 1024;
-}
-
-portable_size! {
-    pub FilenameLen = u8;
-    pub MAX_FILENAME_BYTES = 256;
-}
-
-portable_size! {
-    pub AttachmentSize = u32;
-    pub MAX_ATTACHMENT_BYTES = 20_971_520; // 20Mb
-}
+pub const MAX_ATTACHMENTS: usize = 8;
 
 /// Arbitrary data that can be sent alongside a message.
 /// If requested, the recipient can download it as a file.
@@ -123,6 +39,25 @@ pub struct Attachment {
 
     /// At most [`MAX_ATTACHMENT_BYTES`] bytes
     pub data: Vec<u8>,
+}
+
+impl WriteTo for Attachment {
+    fn write_to<W: ?Sized + Write>(&self, stream: &mut W) -> io::Result<()> {
+        self.filename.write_to::<_, 2>(stream)?;
+        self.alt_text.write_to::<_, 1>(stream)?;
+        self.data.write_to::<_, 4>(stream)?;
+        Ok(())
+    }
+}
+
+impl ReadFrom for Attachment {
+    fn read_from<R: ?Sized + Read>(stream: &mut R) -> io::Result<Self> {
+        Ok(Self {
+            filename: String::read_from::<_, 2>(stream)?,
+            alt_text: String::read_from::<_, 1>(stream)?,
+            data: Vec::read_from::<_, 4>(stream)?,
+        })
+    }
 }
 
 impl Attachment {
@@ -144,50 +79,6 @@ impl Attachment {
             Err(io::Error::other("no such file"))
         }
     }
-
-    fn write_to<W: Write>(&self, mut stream: W) -> io::Result<()> {
-        write_int_ranged!((FilenameLen) [..=MAX_FILENAME_BYTES] "filename too long" (self.filename.len()) -> stream)?;
-        write_int_ranged!((AltTextLen) [..=MAX_ALT_TEXT_BYTES] "alt text too long" (self.alt_text.len()) -> stream)?;
-        write_int_ranged!((AttachmentSize) [..=MAX_ATTACHMENT_BYTES] "attachment too large" (self.data.len()) -> stream)?;
-        stream.write_all(self.filename.as_bytes())?;
-        stream.write_all(self.alt_text.as_bytes())?;
-        stream.write_all(self.data.as_slice())?;
-        Ok(())
-    }
-
-    fn read_from<R: Read>(mut stream: R) -> io::Result<Self> {
-        let filename_len = read_int!((FilenameLen) stream)?;
-        let alt_len = read_int!((AltTextLen) stream)?;
-        let attachment_size = read_int!((AttachmentSize) stream)?;
-        Ok(Attachment {
-            filename: read_string!([filename_len as usize] stream)?,
-            alt_text: read_string!([alt_len as usize] stream)?,
-            data: read_vec!([attachment_size as usize] stream)?,
-        })
-    }
-}
-
-portable_size! {
-    pub DestinationLen = u16;
-    pub MAX_DESTINATION_BYTES = 2048;
-}
-
-portable_size! {
-    pub SocketAddrLen = u8;
-    pub MAX_SOCKET_ADDR_BYTES = 256;
-}
-
-/// At most [`MAX_DESTINATION_BYTES`] bytes.
-type Destination = String;
-
-portable_size! {
-    pub TextLen = u16;
-    pub MAX_TEXT_BYTES = 2048;
-}
-
-portable_size! {
-    pub AttachmentCount = u8;
-    pub MAX_ATTACHMENTS = 8;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -223,6 +114,29 @@ impl Default for UserMessage {
     }
 }
 
+impl WriteTo for UserMessage {
+    fn write_to<W: ?Sized + Write>(&self, stream: &mut W) -> io::Result<()> {
+        self.sender.write_to(stream)?;
+        self.destination.write_to(stream)?;
+        self.timestamp.write_to(stream)?;
+        self.text.write_to::<_, 2>(stream)?;
+        self.attachments.iter().write_list::<_, 1>(stream)?;
+        Ok(())
+    }
+}
+
+impl ReadFrom for UserMessage {
+    fn read_from<R: ?Sized + Read>(stream: &mut R) -> io::Result<Self> {
+        Ok(Self {
+            sender: Option::read_from(stream)?,
+            destination: Destination::read_from(stream)?,
+            timestamp: SystemTime::read_from(stream)?,
+            text: String::read_from::<_, 2>(stream)?,
+            attachments: Vec::read_list::<_, 1>(stream)?,
+        })
+    }
+}
+
 impl UserMessage {
     pub fn new(destination: Destination, text: String, attachments: Vec<Attachment>) -> Self {
         Self {
@@ -233,61 +147,6 @@ impl UserMessage {
             attachments,
         }
     }
-
-    fn write_to<W: Write>(&self, mut stream: W) -> io::Result<()> {
-        let sender = self
-            .sender
-            .as_ref()
-            .map(|x| x.to_string())
-            .unwrap_or_default();
-        write_int_ranged!((SocketAddrLen) [..=MAX_SOCKET_ADDR_BYTES] "???" (sender.len()) -> stream)?;
-        write_int_ranged!((DestinationLen) [..=MAX_DESTINATION_BYTES] "destination too long" (self.destination.len()) -> stream)?;
-        write_int_ranged!((TextLen) [..=MAX_TEXT_BYTES] "message too long" (self.text.len()) -> stream)?;
-        write_int_ranged!((AttachmentCount) [..=MAX_ATTACHMENTS] "too many attachments" (self.attachments.len()) -> stream)?;
-        stream.write_all(sender.as_bytes())?;
-        stream.write_all(self.destination.as_bytes())?;
-        write_timestamp!((SystemTime::now()) -> stream)?;
-        stream.write_all(self.text.as_bytes())?;
-        for attachment in &self.attachments {
-            attachment.write_to(&mut stream)?;
-        }
-        Ok(())
-    }
-
-    fn read_from<R: Read>(mut stream: R) -> io::Result<Self> {
-        let sender_len = read_int!((SocketAddrLen) stream)?;
-        let destination_len = read_int!((DestinationLen) stream)?;
-        let text_len = read_int!((TextLen) stream)?;
-        let attachment_count = read_int!((AttachmentCount) stream)?;
-        let sender = if sender_len != 0 {
-            Some(
-                read_string!([sender_len as usize] stream)?
-                    .parse()
-                    .map_err(io::Error::other)?,
-            )
-        } else {
-            None
-        };
-        let destination = read_string!([destination_len as usize] stream)?;
-        let timestamp = read_timestamp!(stream)?;
-        let text = read_string!([text_len as usize] stream)?;
-        let attachments = std::iter::repeat_with(|| Attachment::read_from(&mut stream))
-            .take(attachment_count as usize)
-            .collect::<io::Result<Vec<_>>>()?;
-
-        Ok(Self {
-            sender,
-            destination,
-            timestamp,
-            text,
-            attachments,
-        })
-    }
-}
-
-portable_size! {
-    pub MemberCount = u8;
-    pub MAX_CHAT_MEMBERS = 256;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -298,27 +157,27 @@ pub enum MessageError {
     BadUsername,
 }
 
-impl From<MessageError> for u8 {
-    fn from(value: MessageError) -> Self {
-        match value {
-            MessageError::DstNexists => 0,
-            MessageError::ChatTaken => 1,
-            MessageError::WrongPassword => 2,
-            MessageError::BadUsername => 3,
+impl WriteTo for MessageError {
+    fn write_to<W: ?Sized + Write>(&self, stream: &mut W) -> io::Result<()> {
+        match self {
+            Self::DstNexists => 0u8,
+            Self::ChatTaken => 1u8,
+            Self::WrongPassword => 2u8,
+            Self::BadUsername => 3u8,
         }
+        .write_to(stream)
     }
 }
 
-impl TryFrom<u8> for MessageError {
-    type Error = u8;
-
-    fn try_from(code: u8) -> Result<Self, Self::Error> {
-        match code {
+impl ReadFrom for MessageError {
+    fn read_from<R: ?Sized + Read>(stream: &mut R) -> io::Result<Self> {
+        match u8::read_from(stream)? {
             0 => Ok(Self::DstNexists),
             1 => Ok(Self::ChatTaken),
             2 => Ok(Self::WrongPassword),
             3 => Ok(Self::BadUsername),
-            _ => Err(code),
+
+            x => Err(io::Error::other(UnknownVariantError(x))),
         }
     }
 }
@@ -357,29 +216,54 @@ impl std::fmt::Display for Identifier {
     }
 }
 
+impl WriteTo for Identifier {
+    fn write_to<W: ?Sized + Write>(&self, stream: &mut W) -> io::Result<()> {
+        match self {
+            Self::Socket(_) => 0u8,
+            Self::User(_) => 1u8,
+        }
+        .write_to(stream)?;
+        match self {
+            Self::Socket(addr) => addr.to_string().write_to::<_, 1>(stream),
+            Self::User(name) => name.write_to::<_, 1>(stream),
+        }
+    }
+}
+
+impl ReadFrom for Identifier {
+    fn read_from<R: ?Sized + Read>(stream: &mut R) -> io::Result<Self> {
+        match u8::read_from(stream)? {
+            0 => SocketAddr::read_from(stream).map(Self::Socket),
+            1 => String::read_from::<_, 1>(stream).map(Self::User),
+
+            x => Err(io::Error::other(UnknownVariantError(x))),
+        }
+    }
+}
+
 #[derive(Debug)]
-pub enum ParseReciptientError {
+pub enum ParseIdentifierError {
     Socket(<SocketAddr as std::str::FromStr>::Err),
     Username,
 }
 
 impl std::str::FromStr for Identifier {
-    type Err = ParseReciptientError;
+    type Err = ParseIdentifierError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.contains(':') {
             s.parse()
                 .map(Identifier::Socket)
-                .map_err(ParseReciptientError::Socket)
+                .map_err(ParseIdentifierError::Socket)
         } else if !s.contains(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_')) {
             Ok(Identifier::User(s.to_string()))
         } else {
-            Err(ParseReciptientError::Username)
+            Err(ParseIdentifierError::Username)
         }
     }
 }
 
-impl std::fmt::Display for ParseReciptientError {
+impl std::fmt::Display for ParseIdentifierError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Socket(e) => write!(f, "failed to parse socket: {e}"),
@@ -391,11 +275,68 @@ impl std::fmt::Display for ParseReciptientError {
     }
 }
 
-impl std::error::Error for ParseReciptientError {
+impl std::error::Error for ParseIdentifierError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Socket(e) => Some(e),
             Self::Username => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Destination {
+    Chat(String),
+    Client(Identifier),
+}
+
+impl Default for Destination {
+    fn default() -> Self {
+        Self::Chat(String::new())
+    }
+}
+
+impl std::str::FromStr for Destination {
+    type Err = io::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(if let Some(s) = s.strip_prefix('#') {
+            // chat
+            Self::Chat(s.to_string())
+        } else {
+            Self::Client(if let Some(s) = s.strip_prefix('@') {
+                // user
+                Identifier::User(s.to_string())
+            } else {
+                // address
+                Identifier::Socket(s.parse().map_err(|e| io::Error::other(format!("{e} | tip: prefix chats with `#` (ex: #chat) and users with `@` (ex: @user); anything else will be read as a socket")))?)
+            })
+        })
+    }
+}
+
+impl WriteTo for Destination {
+    fn write_to<W: ?Sized + Write>(&self, stream: &mut W) -> io::Result<()> {
+        match self {
+            Self::Chat(chat) => {
+                0u8.write_to(stream)?;
+                chat.write_to::<_, 2>(stream)
+            }
+            Self::Client(id) => {
+                1u8.write_to(stream)?;
+                id.write_to(stream)
+            }
+        }
+    }
+}
+
+impl ReadFrom for Destination {
+    fn read_from<R: ?Sized + Read>(stream: &mut R) -> io::Result<Self> {
+        match u8::read_from(stream)? {
+            0 => String::read_from::<_, 2>(stream).map(Self::Chat),
+            1 => Identifier::read_from(stream).map(Self::Client),
+
+            x => Err(io::Error::other(UnknownVariantError(x))),
         }
     }
 }
@@ -406,7 +347,7 @@ pub enum ServerMessage {
     Success,
     Error(MessageError),
     CreateChat {
-        destination: Destination,
+        destination: String,
         members: BTreeSet<Identifier>,
     },
     Login {
@@ -417,110 +358,57 @@ pub enum ServerMessage {
     },
 }
 
-portable_size! {
-    pub UsernameLen = u8;
-    pub MAX_USERNAME_BYTES = 256;
-}
-
-portable_size! {
-    pub PasswordLen = u8;
-    pub MAX_PASSWORD_BYTES = 256;
-}
-
-impl ServerMessage {
-    const ACKNOWLEDGE_CODE: u8 = 0;
-    const SUCCESS_CODE: u8 = 1;
-    const ERROR_CODE: u8 = 2;
-    const CREATE_CHAT_CODE: u8 = 3;
-    const LOGIN_CODE: u8 = 4;
-
-    fn write_to<W: Write>(&self, mut stream: W) -> io::Result<()> {
+impl WriteTo for ServerMessage {
+    fn write_to<W: ?Sized + Write>(&self, stream: &mut W) -> io::Result<()> {
         match self {
-            Self::Acknowledge => stream.write_all(const { &[Self::ACKNOWLEDGE_CODE] })?,
-
-            Self::Success => stream.write_all(const { &[Self::SUCCESS_CODE] })?,
-
-            Self::Error(e) => {
-                stream.write_all(const { &[Self::ERROR_CODE] })?;
-                stream.write_all(&[(*e).into()])?;
-            }
-
+            Self::Acknowledge => 0u8,
+            Self::Success => 1u8,
+            Self::Error(_) => 2u8,
+            Self::CreateChat { .. } => 3u8,
+            Self::Login { .. } => 4u8,
+        }
+        .write_to(stream)?;
+        match self {
+            Self::Acknowledge | Self::Success => Ok(()),
+            Self::Error(e) => e.write_to(stream),
             Self::CreateChat {
                 destination,
                 members,
             } => {
-                stream.write_all(const { &[Self::CREATE_CHAT_CODE] })?;
-                write_int_ranged!((DestinationLen) [..=MAX_DESTINATION_BYTES] "destination too long" (destination.len()) -> stream)?;
-                write_int_ranged!((MemberCount) [..=MAX_CHAT_MEMBERS] "too many members" (members.len()) -> stream)?;
-                stream.write_all(destination.as_bytes())?;
-                for member in members {
-                    let addr = member.to_string();
-                    write_int_ranged!((u8) [..=256] "address too long" (addr.len()) -> stream)?;
-                    stream.write_all(addr.as_bytes())?;
-                }
+                destination.write_to::<_, 1>(stream)?;
+                members.iter().write_list::<_, 2>(stream)
             }
-
             Self::Login { username, password } => {
-                stream.write_all(const { &[Self::LOGIN_CODE] })?;
-                write_int_ranged!((UsernameLen) [..=MAX_USERNAME_BYTES] "username too long" (username.len()) -> stream)?;
-                write_int_ranged!((PasswordLen) [..=MAX_PASSWORD_BYTES] "password too long" (password.len()) -> stream)?;
-                stream.write_all(username.as_bytes())?;
-                stream.write_all(password.as_bytes())?;
+                username.write_to::<_, 1>(stream)?;
+                password.write_to::<_, 1>(stream)
             }
-        }
-        Ok(())
-    }
-
-    fn read_from<R: Read>(mut stream: R) -> io::Result<Self> {
-        match read_int!((u8) stream)? {
-            Self::ACKNOWLEDGE_CODE => Ok(Self::Acknowledge),
-
-            Self::SUCCESS_CODE => Ok(Self::Success),
-
-            Self::ERROR_CODE => {
-                read_int!((u8) stream)?
-                    .try_into()
-                    .map(Self::Error)
-                    .map_err(|code| {
-                        io::Error::other(format!(
-                            "unknown error code: {code} ('{}')",
-                            char::from(code)
-                        ))
-                    })
-            }
-
-            Self::CREATE_CHAT_CODE => {
-                let dst_len = read_int!((DestinationLen) stream)?;
-                let member_count = read_int!((MemberCount) stream)?;
-                Ok(Self::CreateChat {
-                    destination: read_string!([dst_len as usize] stream)?,
-                    members: std::iter::repeat_with(|| {
-                        let addr_len = read_int!((u8) stream)?;
-                        let addr = read_string!([addr_len as usize] stream)?;
-                        addr.parse().map_err(io::Error::other)
-                    })
-                    .take(member_count as usize)
-                    .collect::<io::Result<_>>()?,
-                })
-            }
-
-            Self::LOGIN_CODE => {
-                let username_len = read_int!((UsernameLen) stream)?;
-                let password_len = read_int!((PasswordLen) stream)?;
-                Ok(Self::Login {
-                    username: read_string!([username_len as usize] stream)?,
-                    password: read_string!([password_len as usize] stream)?,
-                })
-            }
-
-            code => Err(io::Error::other(format!(
-                "unknown code: {code} ('{}')",
-                char::from(code)
-            ))),
         }
     }
 }
 
+impl ReadFrom for ServerMessage {
+    fn read_from<R: ?Sized + Read>(stream: &mut R) -> io::Result<Self> {
+        match u8::read_from(stream)? {
+            0 => Ok(Self::Acknowledge),
+            1 => Ok(Self::Success),
+            2 => MessageError::read_from(stream).map(Self::Error),
+            3 => Ok(Self::CreateChat {
+                destination: String::read_from::<_, 1>(stream)?,
+                members: BTreeSet::from_iter(Vec::read_list::<_, 2>(stream)?),
+            }),
+            4 => Ok(Self::Login {
+                username: String::read_from::<_, 1>(stream)?,
+                password: String::read_from::<_, 1>(stream)?,
+            }),
+
+            x => Err(io::Error::other(UnknownVariantError(x))),
+        }
+    }
+}
+
+/// Switches a TcpStream to blocking upon creation.
+/// Resets it to non-blocking when dropped.
+/// This way, even if there's an unexpected early return (like an error), the stream will reset to non-blocking.
 struct TempBlockingTkn<'a>(&'a mut TcpStream);
 
 impl std::ops::Deref for TempBlockingTkn<'_> {
@@ -558,50 +446,62 @@ pub enum Message {
     Server(ServerMessage),
 }
 
-impl Message {
-    const USER_MESSAGE_CODE: u8 = 1;
-    const SERVER_MESSAGE_CODE: u8 = 2;
-
-    pub fn write_to(&self, stream: &mut TcpStream) -> io::Result<()> {
+impl WriteTo for Message {
+    fn write_to<W: ?Sized + Write>(&self, stream: &mut W) -> io::Result<()> {
         match self {
-            Self::User(msg) => {
-                // indicate an incoming message
-                stream.write_all(&[Self::USER_MESSAGE_CODE])?;
-                msg.write_to(stream)
-            }
-            Self::Server(msg) => {
-                // indicate an incoming message
-                stream.write_all(&[Self::SERVER_MESSAGE_CODE])?;
-                msg.write_to(stream)
-            }
+            Self::User(_) => 0u8,
+            Self::Server(_) => 1u8,
+        }
+        .write_to(stream)?;
+        match self {
+            Self::User(msg) => msg.write_to(stream),
+            Self::Server(msg) => msg.write_to(stream),
         }
     }
+}
 
-    pub fn read_from(stream: &mut TcpStream) -> io::Result<Option<Self>> {
+impl ReadFrom for Message {
+    fn read_from<R: ?Sized + Read>(stream: &mut R) -> io::Result<Self> {
+        match u8::read_from(stream)? {
+            0 => UserMessage::read_from(stream).map(Self::User),
+            1 => ServerMessage::read_from(stream).map(Self::Server),
+
+            x => Err(io::Error::other(UnknownVariantError(x))),
+        }
+    }
+}
+
+impl Message {
+    const INCOMING_MESSAGE_CODE: u8 = 255;
+
+    pub fn send(&self, socket: &mut TcpStream) -> io::Result<()> {
+        // write the message to a buffer in case there are errors
+        let mut buf: Vec<u8> = Vec::new();
+        self.write_to(&mut buf)?;
+
+        // indicate an incoming message
+        socket.write_all(&[Self::INCOMING_MESSAGE_CODE])?;
+
+        // send the message through the socket
+        buf.write_to::<_, 8>(socket)
+    }
+
+    pub fn recv(socket: &mut TcpStream) -> io::Result<Option<Self>> {
         let mut msg_type = 0;
 
         // is a message incoming?
-        if stream.read(std::slice::from_mut(&mut msg_type))? == 0 {
+        if socket.read(std::slice::from_mut(&mut msg_type))? == 0 {
             return Ok(None); // no message
         }
 
-        // block until the full message is read
-        let mut tkn = TempBlockingTkn::begin(stream)?;
+        let buf: Vec<u8> = {
+            // read the entire message into a buffer, so we don't get desynced if there are errors
+            Vec::read_from::<_, 8>(&mut *TempBlockingTkn::begin(socket)?)?
+        }; // TempBlockingTkn goes out of scope and ends blocking
 
-        // println!("message type: {msg_type:?} ('{}')", char::from(msg_type));
-        Ok(Some(match msg_type {
-            Self::USER_MESSAGE_CODE => Message::User(UserMessage::read_from(&mut *tkn)?),
-            Self::SERVER_MESSAGE_CODE => Message::Server(ServerMessage::read_from(&mut *tkn)?),
-
-            _ => {
-                eprintln!(
-                    "unknown message type: {msg_type:?} ('{}')",
-                    char::from(msg_type)
-                );
-                return Err(io::Error::other("unexpected message type"));
-            }
-        }))
-    } // token goes out of scope and ends blocking
+        // reinterpret the buffer as a Message
+        Self::read_from(&mut buf.as_slice()).map(Some)
+    }
 }
 
 #[derive(Debug)]

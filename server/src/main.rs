@@ -6,13 +6,13 @@ use std::{
     net::{SocketAddr, TcpListener, TcpStream},
     sync::mpsc,
 };
-use terminal_chat::{ADDRESS, Identifier, Message, MessageError, ServerMessage, StdinChannel};
+use terminal_chat::*;
 
 macro_rules! response {
     (($msg:expr) -> $socket:expr) => {{
         let msg: Message = $msg;
         println!("responding to client with \"{msg:?}\"");
-        if let Err(e) = msg.write_to($socket) {
+        if let Err(e) = msg.send($socket) {
             eprintln!("failed to send response to client: {e}");
         }
     }};
@@ -41,6 +41,17 @@ impl Client {
     }
 }
 
+fn send_message_to_client(msg: &Message, clients: &mut [Client], recipient: &Identifier) {
+    if let Some(client) = clients.iter_mut().find(|client| client.matches(recipient)) {
+        match msg.clone().send(&mut client.socket) {
+            Ok(()) => println!("sent message to client `{recipient}`"),
+            Err(e) => eprintln!("failed to send message to client `{recipient}`: {e}"),
+        }
+    } else {
+        eprintln!("client `{recipient}` offline");
+    }
+}
+
 fn route_message(
     clients: &mut [Client],
     users: &mut HashMap<String, String>,
@@ -56,32 +67,29 @@ fn route_message(
             for attachment in &mut umsg.attachments {
                 attachment.filename = attachment.filename.replace(char::is_whitespace, "_");
             }
-            let destination = &umsg.destination;
-            match chats.get(destination) {
-                Some(members) => {
-                    let msg = Message::User(umsg);
-                    println!("distributing message:\n```\n{msg:?}\n```");
-                    for member in members.iter() {
-                        if clients[sender_index].matches(member) {
-                            continue; // dont echo back to original sender. they know what they wrote.
-                        }
-                        if let Some(recipient) =
-                            clients.iter_mut().find(|client| client.matches(member))
-                        {
-                            if let Err(e) = msg.clone().write_to(&mut recipient.socket) {
-                                eprintln!("failed to send message to client `{member}`: {e}");
-                            } else {
-                                println!("sent message to client `{member}`")
+            match &umsg.destination {
+                Destination::Chat(chat) => match chats.get(chat) {
+                    Some(members) => {
+                        let msg = Message::User(umsg);
+                        println!("distributing message:\n```\n{msg:?}\n```");
+                        for member in members.iter() {
+                            if clients[sender_index].matches(member) {
+                                continue; // dont echo back to original sender. they know what they wrote.
                             }
-                        } else {
-                            eprintln!("chat member `{member}` offline");
+                            send_message_to_client(&msg, clients, member);
                         }
+                        response!((Message::Server(ServerMessage::Success)) -> &mut clients[sender_index].socket);
                     }
-                    response!((Message::Server(ServerMessage::Success)) -> &mut clients[sender_index].socket);
-                }
-                None => {
-                    eprintln!("chat `{destination}` does not exist");
-                    response!((Message::Server(ServerMessage::Error(MessageError::DstNexists))) -> &mut clients[sender_index].socket);
+                    None => {
+                        eprintln!("chat `{chat:?}` does not exist");
+                        response!((Message::Server(ServerMessage::Error(MessageError::DstNexists))) -> &mut clients[sender_index].socket);
+                    }
+                },
+
+                Destination::Client(identifier) => {
+                    let identifier = identifier.clone();
+                    let msg = Message::User(umsg);
+                    send_message_to_client(&msg, clients, &identifier)
                 }
             }
         }
@@ -107,13 +115,6 @@ fn route_message(
                             response!((Message::Server(ServerMessage::Error(MessageError::ChatTaken))) -> &mut clients[sender_index].socket);
                         }
                         Entry::Vacant(entry) => {
-                            // direct message stream created when group name matches user name and there are no other members
-                            if members.is_empty()
-                                && !destination
-                                    .contains(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
-                            {
-                                members.insert(Identifier::User(destination));
-                            }
                             members.insert(
                                 clients[sender_index]
                                     .username
@@ -203,7 +204,7 @@ fn main() {
 
         let mut i = 0;
         while i < clients.len() {
-            match Message::read_from(&mut clients[i].socket) {
+            match Message::recv(&mut clients[i].socket) {
                 Err(e) => {
                     if e.kind() != io::ErrorKind::WouldBlock {
                         eprintln!(
