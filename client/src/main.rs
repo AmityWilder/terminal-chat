@@ -37,6 +37,7 @@ fn display_message(msg: &UserMessage) {
 fn run_command(
     stream: &mut TcpStream,
     curr_dest: &mut Destination,
+    incomplete_message: &mut UserMessage,
     message_history: &[UserMessage],
     cmd: &str,
 ) {
@@ -134,6 +135,27 @@ fn run_command(
             }
         }
 
+        "atch" => {
+            if incomplete_message.attachments.len() < MAX_ATTACHMENTS {
+                if let Some((alt_text, path_str)) = args
+                    .strip_prefix('[')
+                    .and_then(|x| x.strip_suffix("\")"))
+                    .and_then(|x| x.split_once("](\""))
+                {
+                    match Attachment::new(Path::new(path_str), alt_text.to_string()) {
+                        Ok(attachment) => incomplete_message.attachments.push(attachment),
+                        Err(e) => eprintln!("invalid attachment: {e}"),
+                    }
+                } else {
+                    eprintln!(
+                        "malformed attachment, expected [\x1b[90malt text\x1b[0m](\x1b[90mfile path\x1b[0m)"
+                    );
+                }
+            } else {
+                eprintln!("too many attachments; max: {MAX_ATTACHMENTS}");
+            }
+        }
+
         _ => eprintln!("unknown command: {cmd}"),
     }
 }
@@ -154,7 +176,13 @@ fn main() {
         match stdin.try_recv() {
             Ok(text) => {
                 if let Some(cmd) = text.strip_prefix('/') {
-                    run_command(&mut stream, &mut curr_dest, &message_history, cmd);
+                    run_command(
+                        &mut stream,
+                        &mut curr_dest,
+                        &mut incomplete_message,
+                        &message_history,
+                        cmd,
+                    );
                 } else {
                     if text.is_empty() {
                         incomplete_message.destination = curr_dest.clone();
@@ -164,27 +192,8 @@ fn main() {
                         {
                             eprintln!("failed to send message: {e}");
                         }
-                    } else if incomplete_message.text.is_empty() {
-                        incomplete_message.text = text;
                     } else {
-                        if incomplete_message.attachments.len() < MAX_ATTACHMENTS {
-                            if let Some((alt_text, path_str)) = text
-                                .strip_prefix('[')
-                                .and_then(|x| x.strip_suffix("\")"))
-                                .and_then(|x| x.split_once("](\""))
-                            {
-                                match Attachment::new(Path::new(path_str), alt_text.to_string()) {
-                                    Ok(attachment) => {
-                                        incomplete_message.attachments.push(attachment)
-                                    }
-                                    Err(e) => eprintln!("invalid attachment: {e}"),
-                                }
-                            } else {
-                                eprintln!(
-                                    "malformed attachment, expected [\x1b[90malt text\x1b[0m](\x1b[90mfile path\x1b[0m)"
-                                );
-                            }
-                        }
+                        incomplete_message.text.push_str(text.as_str());
                     }
                 }
             }
