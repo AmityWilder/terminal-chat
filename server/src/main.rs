@@ -6,7 +6,7 @@ use std::{
     net::{SocketAddr, TcpListener, TcpStream},
     sync::mpsc,
 };
-use terminal_chat::{ADDRESS, Message, MessageError, ServerMessage, StdinChannel};
+use terminal_chat::{ADDRESS, Identifier, Message, MessageError, ServerMessage, StdinChannel};
 
 macro_rules! response {
     (($msg:expr) -> $socket:expr) => {{
@@ -20,21 +20,38 @@ macro_rules! response {
 
 #[derive(Debug)]
 struct Client {
+    pub username: Option<String>,
     pub socket: TcpStream,
     pub addr: SocketAddr,
 }
 
+impl Client {
+    pub fn identifier(&self) -> Identifier {
+        self.username
+            .as_ref()
+            .map(|name| Identifier::User(name.clone()))
+            .unwrap_or(Identifier::Socket(self.addr))
+    }
+
+    pub fn matches(&self, recip: &Identifier) -> bool {
+        match recip {
+            Identifier::Socket(addr) => &self.addr == addr,
+            Identifier::User(name) => self.username.as_ref().is_some_and(|x| x == name),
+        }
+    }
+}
+
 fn route_message(
     clients: &mut [Client],
-    chats: &mut HashMap<String, BTreeSet<SocketAddr>>,
+    users: &mut HashMap<String, String>,
+    chats: &mut HashMap<String, BTreeSet<Identifier>>,
     sender_index: usize,
     msg: Message,
 ) {
     match msg {
         Message::User(mut umsg) => {
             response!((Message::Server(ServerMessage::Acknowledge)) -> &mut clients[sender_index].socket);
-            let sender = clients[sender_index].addr;
-            umsg.sender = Some(sender);
+            umsg.sender = Some(clients[sender_index].identifier());
             // sanitization
             for attachment in &mut umsg.attachments {
                 attachment.filename = attachment.filename.replace(char::is_whitespace, "_");
@@ -45,11 +62,11 @@ fn route_message(
                     let msg = Message::User(umsg);
                     println!("distributing message:\n```\n{msg:?}\n```");
                     for member in members.iter() {
-                        if *member == sender {
+                        if clients[sender_index].matches(member) {
                             continue; // dont echo back to original sender. they know what they wrote.
                         }
                         if let Some(recipient) =
-                            clients.iter_mut().find(|client| client.addr == *member)
+                            clients.iter_mut().find(|client| client.matches(member))
                         {
                             if let Err(e) = msg.clone().write_to(&mut recipient.socket) {
                                 eprintln!("failed to send message to client `{member}`: {e}");
@@ -84,16 +101,53 @@ fn route_message(
                     mut members,
                 } => {
                     println!("creating chat...");
-                    match chats.entry(destination) {
+                    match chats.entry(destination.clone()) {
                         Entry::Occupied(_) => {
                             eprintln!("a chat with this name already exists");
                             response!((Message::Server(ServerMessage::Error(MessageError::ChatTaken))) -> &mut clients[sender_index].socket);
                         }
                         Entry::Vacant(entry) => {
-                            members.insert(clients[sender_index].addr);
+                            // direct message stream created when group name matches user name and there are no other members
+                            if members.is_empty()
+                                && !destination
+                                    .contains(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                            {
+                                members.insert(Identifier::User(destination));
+                            }
+                            members.insert(
+                                clients[sender_index]
+                                    .username
+                                    .as_ref()
+                                    .map(|s| Identifier::User(s.clone()))
+                                    .unwrap_or(Identifier::Socket(clients[sender_index].addr)),
+                            );
                             entry.insert(members);
                             println!("chat created");
                             response!((Message::Server(ServerMessage::Success)) -> &mut clients[sender_index].socket);
+                        }
+                    }
+                }
+
+                ServerMessage::Login { username, password } => {
+                    if username.contains(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_')) {
+                        println!("invalid username");
+                        response!((Message::Server(ServerMessage::Error(MessageError::BadUsername))) -> &mut clients[sender_index].socket);
+                    } else {
+                        match users.entry(username.clone()) {
+                            Entry::Occupied(entry) => {
+                                if entry.get() == &password {
+                                    clients[sender_index].username = Some(username);
+                                    println!("logged into existing user");
+                                } else {
+                                    println!("incorrect password");
+                                    response!((Message::Server(ServerMessage::Error(MessageError::WrongPassword))) -> &mut clients[sender_index].socket);
+                                }
+                            }
+                            Entry::Vacant(entry) => {
+                                entry.insert(password);
+                                clients[sender_index].username = Some(username);
+                                println!("logged into new user");
+                            }
                         }
                     }
                 }
@@ -111,7 +165,9 @@ fn main() {
         .expect("cannot set nonblocking");
 
     let mut clients = Vec::new();
-    let mut chats = HashMap::<String, BTreeSet<SocketAddr>>::new();
+    let mut users = HashMap::<String, String>::new();
+    // TODO: chats should probably have some way of locking out non-members
+    let mut chats = HashMap::<String, BTreeSet<Identifier>>::new();
 
     println!("awaiting client connect...");
     loop {
@@ -137,7 +193,11 @@ fn main() {
             }
             Ok((socket, addr)) => {
                 println!("client {addr} connected");
-                clients.push(Client { socket, addr })
+                clients.push(Client {
+                    username: None,
+                    socket,
+                    addr,
+                })
             }
         }
 
@@ -162,7 +222,7 @@ fn main() {
                     continue; // `i` now refers to a different client
                 }
 
-                Ok(Some(msg)) => route_message(&mut clients, &mut chats, i, msg),
+                Ok(Some(msg)) => route_message(&mut clients, &mut users, &mut chats, i, msg),
             }
             i += 1;
         }

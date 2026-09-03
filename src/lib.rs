@@ -41,17 +41,6 @@ macro_rules! read_string {
     }};
 }
 
-macro_rules! read_socket_addr {
-    ([$len:expr] $stream:expr) => {{
-        read_string!([$len] $stream)
-            .and_then(|data|
-                (!data.is_empty())
-                    .then(|| data.parse::<SocketAddr>().map_err(io::Error::other))
-                    .transpose()
-            )
-    }};
-}
-
 macro_rules! write_int {
     (($value:expr) -> $stream:expr) => {
         $stream.write_all(&$value.to_le_bytes())
@@ -207,7 +196,7 @@ pub struct UserMessage {
     /// Server will overwrite with client's actual address.
     /// Manual assignment by client will be ignored
     /// (and potentially flagged as suspicious if not matching their actual address).
-    pub sender: Option<SocketAddr>,
+    pub sender: Option<Identifier>,
 
     pub destination: Destination,
 
@@ -246,7 +235,11 @@ impl UserMessage {
     }
 
     fn write_to<W: Write>(&self, mut stream: W) -> io::Result<()> {
-        let sender = self.sender.map(|x| x.to_string()).unwrap_or_default();
+        let sender = self
+            .sender
+            .as_ref()
+            .map(|x| x.to_string())
+            .unwrap_or_default();
         write_int_ranged!((SocketAddrLen) [..=MAX_SOCKET_ADDR_BYTES] "???" (sender.len()) -> stream)?;
         write_int_ranged!((DestinationLen) [..=MAX_DESTINATION_BYTES] "destination too long" (self.destination.len()) -> stream)?;
         write_int_ranged!((TextLen) [..=MAX_TEXT_BYTES] "message too long" (self.text.len()) -> stream)?;
@@ -266,7 +259,15 @@ impl UserMessage {
         let destination_len = read_int!((DestinationLen) stream)?;
         let text_len = read_int!((TextLen) stream)?;
         let attachment_count = read_int!((AttachmentCount) stream)?;
-        let sender = read_socket_addr!([sender_len as usize] stream)?;
+        let sender = if sender_len != 0 {
+            Some(
+                read_string!([sender_len as usize] stream)?
+                    .parse()
+                    .map_err(io::Error::other)?,
+            )
+        } else {
+            None
+        };
         let destination = read_string!([destination_len as usize] stream)?;
         let timestamp = read_timestamp!(stream)?;
         let text = read_string!([text_len as usize] stream)?;
@@ -293,6 +294,8 @@ portable_size! {
 pub enum MessageError {
     DstNexists,
     ChatTaken,
+    WrongPassword,
+    BadUsername,
 }
 
 impl From<MessageError> for u8 {
@@ -300,6 +303,8 @@ impl From<MessageError> for u8 {
         match value {
             MessageError::DstNexists => 0,
             MessageError::ChatTaken => 1,
+            MessageError::WrongPassword => 2,
+            MessageError::BadUsername => 3,
         }
     }
 }
@@ -311,6 +316,8 @@ impl TryFrom<u8> for MessageError {
         match code {
             0 => Ok(Self::DstNexists),
             1 => Ok(Self::ChatTaken),
+            2 => Ok(Self::WrongPassword),
+            3 => Ok(Self::BadUsername),
             _ => Err(code),
         }
     }
@@ -327,11 +334,71 @@ impl std::fmt::Display for MessageError {
                 f,
                 "a chat with that name already exists, you do not have permission to overwrite it"
             ),
+            Self::WrongPassword => write!(f, "incorrect password, try again"),
+            Self::BadUsername => write!(f, "usernames may only contain a-z, A-Z, 0-9, and _"),
         }
     }
 }
 
 impl std::error::Error for MessageError {}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Identifier {
+    Socket(SocketAddr),
+    User(String),
+}
+
+impl std::fmt::Display for Identifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Identifier::Socket(addr) => addr.fmt(f),
+            Identifier::User(name) => name.fmt(f),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ParseReciptientError {
+    Socket(<SocketAddr as std::str::FromStr>::Err),
+    Username,
+}
+
+impl std::str::FromStr for Identifier {
+    type Err = ParseReciptientError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.contains(':') {
+            s.parse()
+                .map(Identifier::Socket)
+                .map_err(ParseReciptientError::Socket)
+        } else if !s.contains(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_')) {
+            Ok(Identifier::User(s.to_string()))
+        } else {
+            Err(ParseReciptientError::Username)
+        }
+    }
+}
+
+impl std::fmt::Display for ParseReciptientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Socket(e) => write!(f, "failed to parse socket: {e}"),
+            Self::Username => write!(
+                f,
+                "invalid username characters: can only be alphanumeric ASCII"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ParseReciptientError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Socket(e) => Some(e),
+            Self::Username => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ServerMessage {
@@ -340,8 +407,24 @@ pub enum ServerMessage {
     Error(MessageError),
     CreateChat {
         destination: Destination,
-        members: BTreeSet<SocketAddr>,
+        members: BTreeSet<Identifier>,
     },
+    Login {
+        username: String,
+        /// TODO: harden this against man-in-the-middle attacks.
+        /// the only security it provides rn is that other clients don't have to know it to message you.
+        password: String,
+    },
+}
+
+portable_size! {
+    pub UsernameLen = u8;
+    pub MAX_USERNAME_BYTES = 256;
+}
+
+portable_size! {
+    pub PasswordLen = u8;
+    pub MAX_PASSWORD_BYTES = 256;
 }
 
 impl ServerMessage {
@@ -349,6 +432,7 @@ impl ServerMessage {
     const SUCCESS_CODE: u8 = 1;
     const ERROR_CODE: u8 = 2;
     const CREATE_CHAT_CODE: u8 = 3;
+    const LOGIN_CODE: u8 = 4;
 
     fn write_to<W: Write>(&self, mut stream: W) -> io::Result<()> {
         match self {
@@ -374,6 +458,14 @@ impl ServerMessage {
                     write_int_ranged!((u8) [..=256] "address too long" (addr.len()) -> stream)?;
                     stream.write_all(addr.as_bytes())?;
                 }
+            }
+
+            Self::Login { username, password } => {
+                stream.write_all(const { &[Self::LOGIN_CODE] })?;
+                write_int_ranged!((UsernameLen) [..=MAX_USERNAME_BYTES] "username too long" (username.len()) -> stream)?;
+                write_int_ranged!((PasswordLen) [..=MAX_PASSWORD_BYTES] "password too long" (password.len()) -> stream)?;
+                stream.write_all(username.as_bytes())?;
+                stream.write_all(password.as_bytes())?;
             }
         }
         Ok(())
@@ -409,6 +501,15 @@ impl ServerMessage {
                     })
                     .take(member_count as usize)
                     .collect::<io::Result<_>>()?,
+                })
+            }
+
+            Self::LOGIN_CODE => {
+                let username_len = read_int!((UsernameLen) stream)?;
+                let password_len = read_int!((PasswordLen) stream)?;
+                Ok(Self::Login {
+                    username: read_string!([username_len as usize] stream)?,
+                    password: read_string!([password_len as usize] stream)?,
                 })
             }
 

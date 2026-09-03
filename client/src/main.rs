@@ -8,17 +8,20 @@ use std::{
     time::SystemTime,
 };
 use terminal_chat::{
-    ADDRESS, Attachment, MAX_ATTACHMENTS, Message, ServerMessage, StdinChannel, UserMessage,
+    ADDRESS, Attachment, Identifier, MAX_ATTACHMENTS, Message, ServerMessage, StdinChannel,
+    UserMessage,
 };
 
 fn display_message(msg: &UserMessage) {
-    print!(
-        "\x1b[90mfrom \x1b[94m{}\x1b[90m in \x1b[94m{}\x1b[90m at ",
-        msg.sender
-            .map(|x| x.to_string())
-            .unwrap_or("[null]".to_string()),
-        msg.destination
-    );
+    print!("\x1b[90mfrom ");
+    match &msg.sender {
+        Some(id) => match id {
+            Identifier::Socket(addr) => print!("\x1b[94m{addr}"),
+            Identifier::User(name) => print!("\x1b[96m{name}"),
+        },
+        None => print!("\x1b[30m[null]"),
+    }
+    print!("\x1b[90m in \x1b[94m{}\x1b[90m at ", msg.destination);
     match msg.timestamp.duration_since(SystemTime::UNIX_EPOCH) {
         Ok(dur) => print!("{}ms since unix epoch", dur.as_millis()),
         Err(e) => print!("\x1b[91m{e}"),
@@ -58,8 +61,11 @@ fn run_command(
             match it.next().map(str::to_string) {
                 None => eprintln!("missing destination"),
 
-                Some(destination) => match it.map(|x| x.parse()).collect::<Result<_, _>>() {
-                    Err(e) => eprintln!("failed to parse member (expecting SocketAddr): {e}"),
+                Some(destination) => match it
+                    .map(|x| x.parse().map_err(io::Error::other))
+                    .collect::<Result<_, _>>()
+                {
+                    Err(e) => eprintln!("failed to parse member: {e}"),
 
                     Ok(members) => {
                         println!("auto-switching current chat to `{destination}`");
@@ -100,6 +106,21 @@ fn run_command(
                 }
             } else {
                 eprintln!("no such attachment");
+            }
+        }
+
+        "iam" => {
+            if let Some((username, password)) = args.split_once(" ") {
+                let message = Message::Server(ServerMessage::Login {
+                    username: username.trim().to_string(),
+                    password: password.trim().to_string(),
+                });
+
+                if let Err(e) = message.write_to(stream) {
+                    eprintln!("failed to send message: {e}");
+                }
+            } else {
+                eprintln!("expected <username> <password>; username cannot contain spaces");
             }
         }
 
@@ -198,7 +219,9 @@ fn main() {
                     ServerMessage::Acknowledge => println!("\x1b[90macknowledged\x1b[0m"),
                     ServerMessage::Success => println!("\x1b[94msuccess\x1b[0m"),
                     ServerMessage::Error(e) => println!("\x1b[91merror: {e}\x1b[0m"),
-                    ServerMessage::CreateChat { .. } => eprintln!("\x1b[90m[unintended]\x1b[0m"),
+                    ServerMessage::CreateChat { .. } | ServerMessage::Login { .. } => {
+                        eprintln!("\x1b[90m[unintended]\x1b[0m")
+                    }
                 },
             },
         }
