@@ -18,6 +18,12 @@ macro_rules! response {
     }};
 }
 
+macro_rules! err_response {
+    (($err:expr) -> $socket:expr) => {
+        response!((Message::Server(ServerMessage::Error($err))) -> $socket)
+    };
+}
+
 #[derive(Debug)]
 struct Client {
     pub username: Option<String>,
@@ -97,7 +103,7 @@ fn route_message(
                     }
                     None => {
                         eprintln!("chat `{chat:?}` does not exist");
-                        response!((Message::Server(ServerMessage::Error(MessageError::DstNexists))) -> &mut clients[sender_index].socket);
+                        err_response!((MessageError::DstNexists) -> &mut clients[sender_index].socket);
                     }
                 },
 
@@ -105,7 +111,7 @@ fn route_message(
                     match dmid(clients[sender_index].identifier(), identifier.clone()) {
                         Err(e) => {
                             eprintln!("could not get user pair: {e}");
-                            response!((Message::Server(ServerMessage::Error(e))) -> &mut clients[sender_index].socket);
+                            err_response!((e) -> &mut clients[sender_index].socket);
                         }
 
                         Ok(user_pair) => {
@@ -137,7 +143,7 @@ fn route_message(
                     match chats.entry(destination.clone()) {
                         Entry::Occupied(_) => {
                             eprintln!("a chat with this name already exists");
-                            response!((Message::Server(ServerMessage::Error(MessageError::ChatTaken))) -> &mut clients[sender_index].socket);
+                            err_response!((MessageError::ChatTaken) -> &mut clients[sender_index].socket);
                         }
                         Entry::Vacant(entry) => {
                             members.insert(
@@ -160,7 +166,7 @@ fn route_message(
                 ServerMessage::Login { username, password } => {
                     if username.contains(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_')) {
                         println!("invalid username");
-                        response!((Message::Server(ServerMessage::Error(MessageError::BadUsername))) -> &mut clients[sender_index].socket);
+                        err_response!((MessageError::BadUsername) -> &mut clients[sender_index].socket);
                     } else {
                         match users.entry(username.clone()) {
                             Entry::Occupied(entry) => {
@@ -170,7 +176,7 @@ fn route_message(
                                     response!((Message::Server(ServerMessage::Success)) -> &mut clients[sender_index].socket);
                                 } else {
                                     println!("incorrect password");
-                                    response!((Message::Server(ServerMessage::Error(MessageError::WrongPassword))) -> &mut clients[sender_index].socket);
+                                    err_response!((MessageError::WrongPassword) -> &mut clients[sender_index].socket);
                                 }
                             }
                             Entry::Vacant(entry) => {
@@ -187,14 +193,14 @@ fn route_message(
                     source,
                     range: (start, end),
                 } => {
-                    let history = match source {
-                        Destination::Chat(chat) => chats.get(&chat).map(|chat| &chat.messages),
+                    let history = match &source {
+                        Destination::Chat(chat) => chats.get(chat).map(|chat| &chat.messages),
 
                         Destination::Client(identifier) => {
                             match dmid(clients[sender_index].identifier(), identifier.clone()) {
                                 Err(e) => {
                                     eprintln!("could not get user pair: {e}");
-                                    response!((Message::Server(ServerMessage::Error(e))) -> &mut clients[sender_index].socket);
+                                    err_response!((e) -> &mut clients[sender_index].socket);
                                     return;
                                 }
 
@@ -212,7 +218,14 @@ fn route_message(
                             .collect();
                         response!((Message::Server(ServerMessage::GetResponse(messages))) -> &mut clients[sender_index].socket);
                     } else {
-                        response!((Message::Server(ServerMessage::Error(MessageError::DstNexists))) -> &mut clients[sender_index].socket);
+                        match &source {
+                            Destination::Chat(_) => {
+                                err_response!((MessageError::DstNexists) -> &mut clients[sender_index].socket)
+                            }
+                            Destination::Client(_) => {
+                                response!((Message::Server(ServerMessage::Success)) -> &mut clients[sender_index].socket)
+                            }
+                        }
                     }
                 }
 
