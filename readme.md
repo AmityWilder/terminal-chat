@@ -47,6 +47,6 @@ At the last week of classes, each team must do a live demo of their project to t
 
 ### Bonus Points
 
-- [ ] 10 Bonus points: Demo your project using at least two different machines.
+- [x] 10 Bonus points: Demo your project using at least two different machines.
 - [x] 10 Bonus points: Ability to send a message to individual users (not just group chat).
 - [x] 10 Bonus points: Ability to send any file.
