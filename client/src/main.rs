@@ -32,9 +32,11 @@ fn display_message(msg: &UserMessage) {
         Err(e) => print!("\x1b[91m{e}"),
     }
     println!("\x1b[90m:\x1b[0m\n{}", msg.text);
-    println!("\x1b[90mattachments:\x1b[94m");
-    for attachment in &msg.attachments {
-        println!("- [{}]({})", attachment.alt_text, attachment.filename);
+    if !msg.attachments.is_empty() {
+        println!("\x1b[90mattachments:\x1b[94m");
+        for attachment in &msg.attachments {
+            println!("- [{}]({})", attachment.alt_text, attachment.filename);
+        }
     }
     println!("\x1b[90m------\x1b[0m")
 }
@@ -255,7 +257,11 @@ fn main() {
                             eprintln!("failed to send message: {e}");
                         }
                     } else {
-                        incomplete_message.text.push_str(text.as_str());
+                        let next_line = text.as_str().trim_end();
+                        let upcoming_len = next_line.len() + '\n'.len_utf8();
+                        incomplete_message.text.reserve(upcoming_len);
+                        incomplete_message.text.push('\n');
+                        incomplete_message.text.push_str(next_line);
                     }
                 }
             }
