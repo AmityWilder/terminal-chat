@@ -10,7 +10,7 @@
 
 #![warn(clippy::undocumented_unsafe_blocks)]
 
-use crate::serde::*;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
     io::{self, Read, Write},
@@ -21,7 +21,8 @@ use std::{
     time::SystemTime,
 };
 
-mod serde;
+mod ameon;
+use ameon::{AmeonDe, AmeonSer};
 
 pub const ADDRESS: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
 
@@ -29,7 +30,7 @@ pub const MAX_ATTACHMENTS: usize = 8;
 
 /// Arbitrary data that can be sent alongside a message.
 /// If requested, the recipient can download it as a file.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Attachment {
     /// At most [`MAX_FILENAME_BYTES`] bytes
     pub filename: String,
@@ -39,25 +40,6 @@ pub struct Attachment {
 
     /// At most [`MAX_ATTACHMENT_BYTES`] bytes
     pub data: Vec<u8>,
-}
-
-impl WriteTo for Attachment {
-    fn write_to<W: ?Sized + Write>(&self, stream: &mut W) -> io::Result<()> {
-        self.filename.write_to::<_, 2>(stream)?;
-        self.alt_text.write_to::<_, 1>(stream)?;
-        self.data.write_to::<_, 4>(stream)?;
-        Ok(())
-    }
-}
-
-impl ReadFrom for Attachment {
-    fn read_from<R: ?Sized + Read>(stream: &mut R) -> io::Result<Self> {
-        Ok(Self {
-            filename: String::read_from::<_, 2>(stream)?,
-            alt_text: String::read_from::<_, 1>(stream)?,
-            data: Vec::read_from::<_, 4>(stream)?,
-        })
-    }
 }
 
 impl Attachment {
@@ -82,7 +64,7 @@ impl Attachment {
 }
 
 /// A message sent by a user containing text and/or files.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct UserMessage {
     /// Server will use [`None`] to indicate "sent by server".
     /// Server will overwrite with client's actual address.
@@ -117,29 +99,6 @@ impl Default for UserMessage {
     }
 }
 
-impl WriteTo for UserMessage {
-    fn write_to<W: ?Sized + Write>(&self, stream: &mut W) -> io::Result<()> {
-        self.sender.write_to(stream)?;
-        self.destination.write_to(stream)?;
-        self.timestamp.write_to(stream)?;
-        self.text.write_to::<_, 2>(stream)?;
-        self.attachments.iter().write_list::<_, 1>(stream)?;
-        Ok(())
-    }
-}
-
-impl ReadFrom for UserMessage {
-    fn read_from<R: ?Sized + Read>(stream: &mut R) -> io::Result<Self> {
-        Ok(Self {
-            sender: <Option<Identifier>>::read_from(stream)?,
-            destination: Destination::read_from(stream)?,
-            timestamp: SystemTime::read_from(stream)?,
-            text: String::read_from::<_, 2>(stream)?,
-            attachments: <Vec<Attachment>>::read_list::<_, 1>(stream)?,
-        })
-    }
-}
-
 impl UserMessage {
     pub fn new(destination: Destination, text: String, attachments: Vec<Attachment>) -> Self {
         Self {
@@ -152,7 +111,7 @@ impl UserMessage {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MessageError {
     DstNexists,
     ChatTaken,
@@ -160,35 +119,6 @@ pub enum MessageError {
     BadUsername,
     SelfSend,
     MsgNexists,
-}
-
-impl WriteTo for MessageError {
-    fn write_to<W: ?Sized + Write>(&self, stream: &mut W) -> io::Result<()> {
-        match self {
-            Self::DstNexists => 0u8,
-            Self::ChatTaken => 1u8,
-            Self::WrongPassword => 2u8,
-            Self::BadUsername => 3u8,
-            Self::SelfSend => 4u8,
-            Self::MsgNexists => 5u8,
-        }
-        .write_to(stream)
-    }
-}
-
-impl ReadFrom for MessageError {
-    fn read_from<R: ?Sized + Read>(stream: &mut R) -> io::Result<Self> {
-        match u8::read_from(stream)? {
-            0 => Ok(Self::DstNexists),
-            1 => Ok(Self::ChatTaken),
-            2 => Ok(Self::WrongPassword),
-            3 => Ok(Self::BadUsername),
-            4 => Ok(Self::SelfSend),
-            5 => Ok(Self::MsgNexists),
-
-            x => Err(io::Error::other(UnknownVariantError(x))),
-        }
-    }
 }
 
 impl std::fmt::Display for MessageError {
@@ -212,23 +142,12 @@ impl std::fmt::Display for MessageError {
 
 impl std::error::Error for MessageError {}
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
 pub struct ChatName(String);
 
 impl std::fmt::Display for ChatName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
-    }
-}
-
-impl WriteTo for ChatName {
-    fn write_to<W: ?Sized + Write>(&self, stream: &mut W) -> io::Result<()> {
-        self.0.as_str().write_to::<_, 1>(stream)
-    }
-}
-impl ReadFrom for ChatName {
-    fn read_from<R: ?Sized + Read>(stream: &mut R) -> io::Result<Self> {
-        String::read_from::<_, 1>(stream).map(Self)
     }
 }
 
@@ -313,23 +232,12 @@ impl std::str::FromStr for ChatName {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Username(String);
 
 impl std::fmt::Display for Username {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
-    }
-}
-
-impl WriteTo for Username {
-    fn write_to<W: ?Sized + Write>(&self, stream: &mut W) -> io::Result<()> {
-        self.0.as_str().write_to::<_, 1>(stream)
-    }
-}
-impl ReadFrom for Username {
-    fn read_from<R: ?Sized + Read>(stream: &mut R) -> io::Result<Self> {
-        String::read_from::<_, 1>(stream).map(Self)
     }
 }
 
@@ -415,7 +323,7 @@ impl std::str::FromStr for Username {
 }
 
 /// Identifier of a connected client
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Identifier {
     /// Uniquely identifies one connected user, but cannot be trusted to belong to the same one after disconnecting and reconnecting.
     /// A user may have an entirely different socket address after reconnecting.
@@ -433,31 +341,6 @@ impl std::fmt::Display for Identifier {
         match self {
             Identifier::Socket(addr) => addr.fmt(f),
             Identifier::User(name) => name.fmt(f),
-        }
-    }
-}
-
-impl WriteTo for Identifier {
-    fn write_to<W: ?Sized + Write>(&self, stream: &mut W) -> io::Result<()> {
-        match self {
-            Self::Socket(_) => 0u8,
-            Self::User(_) => 1u8,
-        }
-        .write_to(stream)?;
-        match self {
-            Self::Socket(addr) => addr.write_to(stream),
-            Self::User(name) => name.write_to(stream),
-        }
-    }
-}
-
-impl ReadFrom for Identifier {
-    fn read_from<R: ?Sized + Read>(stream: &mut R) -> io::Result<Self> {
-        match u8::read_from(stream)? {
-            0 => SocketAddr::read_from(stream).map(Self::Socket),
-            1 => Username::read_from(stream).map(Self::User),
-
-            x => Err(io::Error::other(UnknownVariantError(x))),
         }
     }
 }
@@ -507,7 +390,7 @@ impl std::error::Error for ParseIdentifierError {
 /// - A client
 ///   - via username
 ///   - via socket
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Destination {
     Chat(ChatName),
     Client(Identifier),
@@ -537,32 +420,6 @@ impl std::str::FromStr for Destination {
                 )))?)
             })
         })
-    }
-}
-
-impl WriteTo for Destination {
-    fn write_to<W: ?Sized + Write>(&self, stream: &mut W) -> io::Result<()> {
-        match self {
-            Self::Chat(chat) => {
-                0u8.write_to(stream)?;
-                chat.write_to(stream)
-            }
-            Self::Client(id) => {
-                1u8.write_to(stream)?;
-                id.write_to(stream)
-            }
-        }
-    }
-}
-
-impl ReadFrom for Destination {
-    fn read_from<R: ?Sized + Read>(stream: &mut R) -> io::Result<Self> {
-        match u8::read_from(stream)? {
-            0 => ChatName::read_from(stream).map(Self::Chat),
-            1 => Identifier::read_from(stream).map(Self::Client),
-
-            x => Err(io::Error::other(UnknownVariantError(x))),
-        }
     }
 }
 
@@ -600,7 +457,7 @@ impl<'a> TempBlockingTkn<'a> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Message {
     Acknowledge,
     Success,
@@ -628,88 +485,6 @@ pub enum Message {
         chat: ChatName,
         members: BTreeSet<Identifier>,
     },
-}
-
-impl WriteTo for Message {
-    fn write_to<W: ?Sized + Write>(&self, stream: &mut W) -> io::Result<()> {
-        match self {
-            Self::Acknowledge => 0u8,
-            Self::Success => 1,
-            Self::Error(_) => 2,
-            Self::User(_) => 3,
-            Self::CreateChat { .. } => 4,
-            Self::Login { .. } => 5,
-            Self::Get { .. } => 6,
-            Self::GetResponse(_) => 7,
-            Self::ModifyChatMembers { .. } => 8,
-        }
-        .write_to(stream)?;
-        match self {
-            Self::Acknowledge | Self::Success => Ok(()),
-            Self::Error(e) => e.write_to(stream),
-            Self::User(msg) => msg.write_to(stream),
-            Self::CreateChat {
-                destination,
-                members,
-            } => {
-                destination.write_to(stream)?;
-                members.iter().write_list::<_, 2>(stream)
-            }
-            Self::Login { username, password } => {
-                username.write_to(stream)?;
-                password.write_to::<_, 1>(stream)
-            }
-            Self::Get { source, range } => {
-                source.write_to(stream)?;
-                range.0.write_to::<_, 4>(stream)?;
-                range.1.write_to::<_, 4>(stream)
-            }
-            Self::GetResponse(messages) => messages.iter().write_list::<_, 4>(stream),
-            Self::ModifyChatMembers {
-                remove,
-                chat,
-                members,
-            } => {
-                remove.write_to(stream)?;
-                chat.write_to(stream)?;
-                members.iter().write_list::<_, 1>(stream)
-            }
-        }
-    }
-}
-
-impl ReadFrom for Message {
-    fn read_from<R: ?Sized + Read>(stream: &mut R) -> io::Result<Self> {
-        match u8::read_from(stream)? {
-            0 => Ok(Self::Acknowledge),
-            1 => Ok(Self::Success),
-            2 => MessageError::read_from(stream).map(Self::Error),
-            3 => UserMessage::read_from(stream).map(Self::User),
-            4 => Ok(Self::CreateChat {
-                destination: ChatName::read_from(stream)?,
-                members: BTreeSet::read_list::<_, 2>(stream)?,
-            }),
-            5 => Ok(Self::Login {
-                username: Username::read_from(stream)?,
-                password: String::read_from::<_, 1>(stream)?,
-            }),
-            6 => Ok(Self::Get {
-                source: Destination::read_from(stream)?,
-                range: (
-                    usize::read_from::<_, 4>(stream)?,
-                    usize::read_from::<_, 4>(stream)?,
-                ),
-            }),
-            7 => Vec::read_list::<_, 4>(stream).map(Self::GetResponse),
-            8 => Ok(Self::ModifyChatMembers {
-                remove: bool::read_from(stream)?,
-                chat: ChatName::read_from(stream)?,
-                members: BTreeSet::read_list::<_, 1>(stream)?,
-            }),
-
-            x => Err(io::Error::other(UnknownVariantError(x))),
-        }
-    }
 }
 
 impl Message {
