@@ -279,11 +279,13 @@ struct Chat {
 fn main() {
     let stdin = StdinChannel::new();
 
-    let target = std::env::args()
+    let target: SocketAddr = std::env::args()
         .nth(1)
-        .and_then(|x| x.parse().ok())
-        .unwrap_or(ADDRESS);
+        .expect("missing address argument")
+        .parse()
+        .expect("invalid address format");
     let listener = TcpListener::bind(target).expect("failed to create server");
+    println!("hosting on {target} ({})", listener.local_addr().unwrap());
     listener
         .set_nonblocking(true)
         .expect("cannot set nonblocking");

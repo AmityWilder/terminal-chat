@@ -2,7 +2,7 @@
 
 use std::{
     io::{self, Write},
-    net::TcpStream,
+    net::{SocketAddr, TcpStream},
     path::Path,
     sync::mpsc,
     time::{Duration, SystemTime},
@@ -216,10 +216,11 @@ fn run_command(
 fn main() {
     let stdin = StdinChannel::new();
 
-    let target = std::env::args()
+    let target: SocketAddr = std::env::args()
         .nth(1)
-        .and_then(|x| x.parse().ok())
-        .unwrap_or(ADDRESS);
+        .expect("missing address argument")
+        .parse()
+        .expect("invalid address format");
     println!("connecting to {target}...");
     let mut stream =
         TcpStream::connect_timeout(&target, Duration::from_secs(2)).expect("failed to connect");
