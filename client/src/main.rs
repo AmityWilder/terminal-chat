@@ -216,7 +216,9 @@ fn run_command(
 fn main() {
     let stdin = StdinChannel::new();
 
-    let mut stream = TcpStream::connect(ADDRESS).expect("failed to create client");
+    let mut stream = TcpStream::connect(stdin.recv().expect("hung up").parse().unwrap_or(ADDRESS))
+        .expect("failed to create client");
+
     stream
         .set_nonblocking(true)
         .expect("cannot set nonblocking");
