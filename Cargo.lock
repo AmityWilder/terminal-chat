@@ -96,6 +96,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 name = "client"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "terminal-chat",
 ]
 
@@ -148,6 +149,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
 dependencies = [
  "serde_core",
+ "serde_derive",
 ]
 
 [[package]]
@@ -175,7 +177,6 @@ name = "server"
 version = "0.1.0"
 dependencies = [
  "clap",
- "serde",
  "terminal-chat",
 ]
 
@@ -199,6 +200,9 @@ dependencies = [
 [[package]]
 name = "terminal-chat"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "unicode-ident"
