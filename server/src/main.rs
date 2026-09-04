@@ -279,7 +279,11 @@ struct Chat {
 fn main() {
     let stdin = StdinChannel::new();
 
-    let listener = TcpListener::bind(ADDRESS).expect("failed to create server");
+    let target = std::env::args()
+        .nth(1)
+        .and_then(|x| x.parse().ok())
+        .unwrap_or(ADDRESS);
+    let listener = TcpListener::bind(target).expect("failed to create server");
     listener
         .set_nonblocking(true)
         .expect("cannot set nonblocking");
