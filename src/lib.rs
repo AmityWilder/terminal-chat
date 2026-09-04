@@ -14,7 +14,7 @@ use crate::serde::*;
 use std::{
     collections::BTreeSet,
     io::{self, Read, Write},
-    net::{Ipv4Addr, SocketAddr, TcpStream},
+    net::{AddrParseError, Ipv4Addr, SocketAddr, TcpStream},
     path::Path,
     sync::mpsc::{self, Receiver},
     thread::{self, JoinHandle},
@@ -81,6 +81,7 @@ impl Attachment {
     }
 }
 
+/// A message sent by a user containing text and/or files.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UserMessage {
     /// Server will use [`None`] to indicate "sent by server".
@@ -89,16 +90,18 @@ pub struct UserMessage {
     /// (and potentially flagged as suspicious if not matching their actual address).
     pub sender: Option<Identifier>,
 
+    /// Where to send the message (see [`Destination`]).
+    /// Absense of a destination (empty string) will be interpreted as global chat.
     pub destination: Destination,
 
     /// The server will always replace this value with the time *it* received the message.
     /// Clients can be tampered with and are not trusted to make claims about baseline reality.
     pub timestamp: SystemTime,
 
-    /// At most [`MAX_TEXT_BYTES`] bytes
+    /// The text content of the message
     pub text: String,
 
-    /// At most [`MAX_ATTACHMENTS`] images
+    /// At most [`MAX_ATTACHMENTS`] attachments.
     pub attachments: Vec<Attachment>,
 }
 
@@ -209,10 +212,220 @@ impl std::fmt::Display for MessageError {
 
 impl std::error::Error for MessageError {}
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct ChatName(String);
+
+impl std::fmt::Display for ChatName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl WriteTo for ChatName {
+    fn write_to<W: ?Sized + Write>(&self, stream: &mut W) -> io::Result<()> {
+        self.0.as_str().write_to::<_, 1>(stream)
+    }
+}
+impl ReadFrom for ChatName {
+    fn read_from<R: ?Sized + Read>(stream: &mut R) -> io::Result<Self> {
+        String::read_from::<_, 1>(stream).map(Self)
+    }
+}
+
+impl ChatName {
+    pub const MAX_BYTES: usize = 255;
+
+    /// Truncate and convert illegal symbols, like spaces into underscores.
+    /// This isn't built into the parsing methods because the user should have a chance to confirm after the name is sanitized,
+    /// in case it truncates "`assets`" -> "`ass`" or converts "`f𝓻𝓲𝓮𝓷𝓭𝓼`" -> "`f______`"
+    pub fn sanitize(s: &str) -> String {
+        let mut res = s
+            .trim_start_matches(|ch: char| !ch.is_ascii_lowercase() || ch.is_whitespace())
+            .trim()
+            .replace(|ch: char| !matches!(ch, 'a'..='z' | '0'..='9' | '-'), "-");
+        res.truncate(Self::MAX_BYTES); // all characters are ascii, so this shouldn't panic
+        debug_assert!(
+            Self::is_valid(&res).is_ok(),
+            "sanitization should produce valid names"
+        );
+        res
+    }
+
+    /// Test if a candidate name is allowed, returning the error preventing validity if it isn't
+    pub fn is_valid(s: &str) -> Result<(), ParseChatNameError> {
+        if s.len() > Self::MAX_BYTES {
+            Err(ParseChatNameError::TooLong)
+        } else if !s.starts_with(|ch: char| ch.is_ascii_lowercase())
+            || s.contains(|ch: char| !matches!(ch, 'a'..='z' | '0'..='9' | '-'))
+        {
+            Err(ParseChatNameError::BadChar)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl std::ops::Deref for ChatName {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_str()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParseChatNameError {
+    BadChar,
+    TooLong,
+}
+
+impl std::fmt::Display for ParseChatNameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadChar => write!(
+                f,
+                "chat names may only contain a-z, 0-9, or -, and must start with a letter"
+            ),
+            Self::TooLong => write!(
+                f,
+                "chat names have a maximum length of {}",
+                ChatName::MAX_BYTES
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ParseChatNameError {}
+
+impl TryFrom<String> for ChatName {
+    type Error = ParseChatNameError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::is_valid(value.as_str()).map(|()| Self(value))
+    }
+}
+
+impl std::str::FromStr for ChatName {
+    type Err = ParseChatNameError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::is_valid(s).map(|()| Self(s.to_string()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Username(String);
+
+impl std::fmt::Display for Username {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl WriteTo for Username {
+    fn write_to<W: ?Sized + Write>(&self, stream: &mut W) -> io::Result<()> {
+        self.0.as_str().write_to::<_, 1>(stream)
+    }
+}
+impl ReadFrom for Username {
+    fn read_from<R: ?Sized + Read>(stream: &mut R) -> io::Result<Self> {
+        String::read_from::<_, 1>(stream).map(Self)
+    }
+}
+
+impl Username {
+    pub const MAX_BYTES: usize = 255;
+
+    /// Truncate and convert illegal symbols, like spaces into underscores.
+    /// This isn't built into the parsing methods because the user should have a chance to confirm after the name is sanitized,
+    /// in case it truncates "`assets`" -> "`ass`" or converts "`f𝓻𝓲𝓮𝓷𝓭𝓼`" -> "`f______`"
+    pub fn sanitize(s: &str) -> String {
+        let mut res = s
+            .trim_start_matches(|ch: char| ch.is_ascii_digit() || ch.is_whitespace())
+            .trim()
+            .replace(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'), "_");
+        res.truncate(Self::MAX_BYTES); // all characters are ascii, so this shouldn't panic
+        debug_assert!(
+            Self::is_valid(&res).is_ok(),
+            "sanitization should produce valid names"
+        );
+        res
+    }
+
+    /// Test if a candidate name is allowed, returning the error preventing validity if it isn't
+    pub fn is_valid(s: &str) -> Result<(), ParseUserNameError> {
+        if s.len() > Self::MAX_BYTES {
+            Err(ParseUserNameError::TooLong)
+        } else if s.starts_with(|ch: char| ch.is_ascii_digit())
+            || s.contains(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        {
+            Err(ParseUserNameError::BadChar)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl std::ops::Deref for Username {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_str()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParseUserNameError {
+    BadChar,
+    TooLong,
+}
+
+impl std::fmt::Display for ParseUserNameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadChar => write!(
+                f,
+                "usernames may only contain a-z, A-Z, 0-9, or _, and cannot start with a number"
+            ),
+            Self::TooLong => write!(
+                f,
+                "usernames have a maximum length of {}",
+                Username::MAX_BYTES
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ParseUserNameError {}
+
+impl TryFrom<String> for Username {
+    type Error = ParseUserNameError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::is_valid(value.as_str()).map(|()| Self(value))
+    }
+}
+
+impl std::str::FromStr for Username {
+    type Err = ParseUserNameError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::is_valid(s).map(|()| Self(s.to_string()))
+    }
+}
+
+/// Identifier of a connected client
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Identifier {
+    /// Uniquely identifies one connected user, but cannot be trusted to belong to the same one after disconnecting and reconnecting.
+    /// A user may have an entirely different socket address after reconnecting.
+    ///
+    /// This option exists mainly for users who haven't logged in yet or want to remain anonymous.
+    /// Socket addresses will be removed from group chats upon disconnecting.
     Socket(SocketAddr),
-    User(String),
+
+    /// The username of a client - multiple sockets can be the same user, even at the same time, and can disconnect
+    User(Username),
 }
 
 impl std::fmt::Display for Identifier {
@@ -232,8 +445,8 @@ impl WriteTo for Identifier {
         }
         .write_to(stream)?;
         match self {
-            Self::Socket(addr) => addr.to_string().write_to::<_, 1>(stream),
-            Self::User(name) => name.write_to::<_, 1>(stream),
+            Self::Socket(addr) => addr.write_to(stream),
+            Self::User(name) => name.write_to(stream),
         }
     }
 }
@@ -242,7 +455,7 @@ impl ReadFrom for Identifier {
     fn read_from<R: ?Sized + Read>(stream: &mut R) -> io::Result<Self> {
         match u8::read_from(stream)? {
             0 => SocketAddr::read_from(stream).map(Self::Socket),
-            1 => String::read_from::<_, 1>(stream).map(Self::User),
+            1 => Username::read_from(stream).map(Self::User),
 
             x => Err(io::Error::other(UnknownVariantError(x))),
         }
@@ -251,8 +464,8 @@ impl ReadFrom for Identifier {
 
 #[derive(Debug)]
 pub enum ParseIdentifierError {
-    Socket(<SocketAddr as std::str::FromStr>::Err),
-    Username,
+    Socket(AddrParseError),
+    Username(ParseUserNameError),
 }
 
 impl std::str::FromStr for Identifier {
@@ -263,10 +476,10 @@ impl std::str::FromStr for Identifier {
             s.parse()
                 .map(Identifier::Socket)
                 .map_err(ParseIdentifierError::Socket)
-        } else if !s.contains(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_')) {
-            Ok(Identifier::User(s.to_string()))
         } else {
-            Err(ParseIdentifierError::Username)
+            s.parse()
+                .map(Identifier::User)
+                .map_err(ParseIdentifierError::Username)
         }
     }
 }
@@ -275,10 +488,7 @@ impl std::fmt::Display for ParseIdentifierError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Socket(e) => write!(f, "failed to parse socket: {e}"),
-            Self::Username => write!(
-                f,
-                "invalid username characters: can only be alphanumeric ASCII"
-            ),
+            Self::Username(e) => write!(f, "invalid username: {e}"),
         }
     }
 }
@@ -287,20 +497,25 @@ impl std::error::Error for ParseIdentifierError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Socket(e) => Some(e),
-            Self::Username => None,
+            Self::Username(e) => Some(e),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Where a message should be sent:
+/// - A named group chat
+/// - A client
+///   - via username
+///   - via socket
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Destination {
-    Chat(String),
+    Chat(ChatName),
     Client(Identifier),
 }
 
 impl Default for Destination {
     fn default() -> Self {
-        Self::Chat(String::new())
+        Self::Chat(ChatName::default())
     }
 }
 
@@ -310,14 +525,16 @@ impl std::str::FromStr for Destination {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(if let Some(s) = s.strip_prefix('#') {
             // chat
-            Self::Chat(s.to_string())
+            Self::Chat(s.parse().map_err(io::Error::other)?)
         } else {
             Self::Client(if let Some(s) = s.strip_prefix('@') {
                 // user
-                Identifier::User(s.to_string())
+                Identifier::User(s.parse().map_err(io::Error::other)?)
             } else {
                 // address
-                Identifier::Socket(s.parse().map_err(|e| io::Error::other(format!("{e} | tip: prefix chats with `#` (ex: #chat) and users with `@` (ex: @user); anything else will be read as a socket")))?)
+                Identifier::Socket(s.parse().map_err(|e| io::Error::other(format!(
+                    "{e} | tip: prefix chats with `#` (ex: #chat) and users with `@` (ex: @user); anything else will be read as a socket"
+                )))?)
             })
         })
     }
@@ -328,7 +545,7 @@ impl WriteTo for Destination {
         match self {
             Self::Chat(chat) => {
                 0u8.write_to(stream)?;
-                chat.write_to::<_, 2>(stream)
+                chat.write_to(stream)
             }
             Self::Client(id) => {
                 1u8.write_to(stream)?;
@@ -341,94 +558,8 @@ impl WriteTo for Destination {
 impl ReadFrom for Destination {
     fn read_from<R: ?Sized + Read>(stream: &mut R) -> io::Result<Self> {
         match u8::read_from(stream)? {
-            0 => String::read_from::<_, 2>(stream).map(Self::Chat),
+            0 => ChatName::read_from(stream).map(Self::Chat),
             1 => Identifier::read_from(stream).map(Self::Client),
-
-            x => Err(io::Error::other(UnknownVariantError(x))),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ServerMessage {
-    Acknowledge,
-    Success,
-    Error(MessageError),
-    CreateChat {
-        destination: String,
-        members: BTreeSet<Identifier>,
-    },
-    Login {
-        username: String,
-        /// TODO: harden this against man-in-the-middle attacks.
-        /// the only security it provides rn is that other clients don't have to know it to message you.
-        password: String,
-    },
-    Get {
-        source: Destination,
-        range: (usize, usize),
-    },
-    GetResponse(Vec<UserMessage>),
-}
-
-impl WriteTo for ServerMessage {
-    fn write_to<W: ?Sized + Write>(&self, stream: &mut W) -> io::Result<()> {
-        match self {
-            Self::Acknowledge => 0u8,
-            Self::Success => 1u8,
-            Self::Error(_) => 2u8,
-            Self::CreateChat { .. } => 3u8,
-            Self::Login { .. } => 4u8,
-            Self::Get { .. } => 5u8,
-            Self::GetResponse(_) => 6u8,
-        }
-        .write_to(stream)?;
-        match self {
-            Self::Acknowledge | Self::Success => Ok(()),
-            Self::Error(e) => e.write_to(stream),
-            Self::CreateChat {
-                destination,
-                members,
-            } => {
-                destination.write_to::<_, 1>(stream)?;
-                members.iter().write_list::<_, 2>(stream)
-            }
-            Self::Login { username, password } => {
-                username.write_to::<_, 1>(stream)?;
-                password.write_to::<_, 1>(stream)
-            }
-            Self::Get { source, range } => {
-                source.write_to(stream)?;
-                range.0.write_to::<_, 4>(stream)?;
-                range.1.write_to::<_, 4>(stream)
-            }
-            Self::GetResponse(messages) => messages.iter().write_list::<_, 4>(stream),
-        }
-    }
-}
-
-impl ReadFrom for ServerMessage {
-    fn read_from<R: ?Sized + Read>(stream: &mut R) -> io::Result<Self> {
-        match u8::read_from(stream)? {
-            0 => Ok(Self::Acknowledge),
-            1 => Ok(Self::Success),
-            2 => MessageError::read_from(stream).map(Self::Error),
-            3 => Ok(Self::CreateChat {
-                destination: String::read_from::<_, 1>(stream)?,
-                members: BTreeSet::from_iter(Vec::read_list::<_, 2>(stream)?),
-            }),
-            4 => Ok(Self::Login {
-                username: String::read_from::<_, 1>(stream)?,
-                password: String::read_from::<_, 1>(stream)?,
-            }),
-            5 => Ok(Self::Get {
-                source: Destination::read_from(stream)?,
-                range: (
-                    usize::read_from::<_, 4>(stream)?,
-                    usize::read_from::<_, 4>(stream)?,
-                ),
-            }),
-            6 => Vec::read_list::<_, 4>(stream).map(Self::GetResponse),
 
             x => Err(io::Error::other(UnknownVariantError(x))),
         }
@@ -471,20 +602,78 @@ impl<'a> TempBlockingTkn<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Message {
+    Acknowledge,
+    Success,
+    Error(MessageError),
     User(UserMessage),
-    Server(ServerMessage),
+    CreateChat {
+        destination: ChatName,
+        members: BTreeSet<Identifier>,
+    },
+    Login {
+        username: Username,
+        /// TODO: harden this against man-in-the-middle attacks.
+        /// the only security it provides rn is that other clients don't have to know it to message you.
+        password: String,
+    },
+    Get {
+        source: Destination,
+        range: (usize, usize),
+    },
+    GetResponse(Vec<UserMessage>),
+    ModifyChatMembers {
+        /// false: add
+        /// true: remove
+        remove: bool,
+        chat: ChatName,
+        members: BTreeSet<Identifier>,
+    },
 }
 
 impl WriteTo for Message {
     fn write_to<W: ?Sized + Write>(&self, stream: &mut W) -> io::Result<()> {
         match self {
-            Self::User(_) => 0u8,
-            Self::Server(_) => 1u8,
+            Self::Acknowledge => 0u8,
+            Self::Success => 1,
+            Self::Error(_) => 2,
+            Self::User(_) => 3,
+            Self::CreateChat { .. } => 4,
+            Self::Login { .. } => 5,
+            Self::Get { .. } => 6,
+            Self::GetResponse(_) => 7,
+            Self::ModifyChatMembers { .. } => 8,
         }
         .write_to(stream)?;
         match self {
+            Self::Acknowledge | Self::Success => Ok(()),
+            Self::Error(e) => e.write_to(stream),
             Self::User(msg) => msg.write_to(stream),
-            Self::Server(msg) => msg.write_to(stream),
+            Self::CreateChat {
+                destination,
+                members,
+            } => {
+                destination.write_to(stream)?;
+                members.iter().write_list::<_, 2>(stream)
+            }
+            Self::Login { username, password } => {
+                username.write_to(stream)?;
+                password.write_to::<_, 1>(stream)
+            }
+            Self::Get { source, range } => {
+                source.write_to(stream)?;
+                range.0.write_to::<_, 4>(stream)?;
+                range.1.write_to::<_, 4>(stream)
+            }
+            Self::GetResponse(messages) => messages.iter().write_list::<_, 4>(stream),
+            Self::ModifyChatMembers {
+                remove,
+                chat,
+                members,
+            } => {
+                remove.write_to(stream)?;
+                chat.write_to(stream)?;
+                members.iter().write_list::<_, 1>(stream)
+            }
         }
     }
 }
@@ -492,8 +681,31 @@ impl WriteTo for Message {
 impl ReadFrom for Message {
     fn read_from<R: ?Sized + Read>(stream: &mut R) -> io::Result<Self> {
         match u8::read_from(stream)? {
-            0 => UserMessage::read_from(stream).map(Self::User),
-            1 => ServerMessage::read_from(stream).map(Self::Server),
+            0 => Ok(Self::Acknowledge),
+            1 => Ok(Self::Success),
+            2 => MessageError::read_from(stream).map(Self::Error),
+            3 => UserMessage::read_from(stream).map(Self::User),
+            4 => Ok(Self::CreateChat {
+                destination: ChatName::read_from(stream)?,
+                members: BTreeSet::read_list::<_, 2>(stream)?,
+            }),
+            5 => Ok(Self::Login {
+                username: Username::read_from(stream)?,
+                password: String::read_from::<_, 1>(stream)?,
+            }),
+            6 => Ok(Self::Get {
+                source: Destination::read_from(stream)?,
+                range: (
+                    usize::read_from::<_, 4>(stream)?,
+                    usize::read_from::<_, 4>(stream)?,
+                ),
+            }),
+            7 => Vec::read_list::<_, 4>(stream).map(Self::GetResponse),
+            8 => Ok(Self::ModifyChatMembers {
+                remove: bool::read_from(stream)?,
+                chat: ChatName::read_from(stream)?,
+                members: BTreeSet::read_list::<_, 1>(stream)?,
+            }),
 
             x => Err(io::Error::other(UnknownVariantError(x))),
         }
@@ -577,6 +789,10 @@ impl StdinChannel {
                             Ok(_) => {
                                 while buffer.ends_with(['\n', '\r']) {
                                     buffer.pop();
+                                }
+                                if buffer.as_str() == "exit" {
+                                    println!("closing");
+                                    break;
                                 }
                                 if let Err(e) = sndr.send(buffer) {
                                     eprintln!("failed to send buffer: {e}");
