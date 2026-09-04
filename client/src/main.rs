@@ -5,7 +5,7 @@ use std::{
     net::TcpStream,
     path::Path,
     sync::mpsc,
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 use terminal_chat::*;
 
@@ -216,8 +216,14 @@ fn run_command(
 fn main() {
     let stdin = StdinChannel::new();
 
-    let mut stream = TcpStream::connect(stdin.recv().expect("hung up").parse().unwrap_or(ADDRESS))
-        .expect("failed to create client");
+    let target = std::env::args()
+        .nth(1)
+        .and_then(|x| x.parse().ok())
+        .unwrap_or(ADDRESS);
+    println!("connecting to {target}...");
+    let mut stream =
+        TcpStream::connect_timeout(&target, Duration::from_secs(2)).expect("failed to connect");
+    println!("connected to {}", stream.peer_addr().unwrap());
 
     stream
         .set_nonblocking(true)
