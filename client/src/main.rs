@@ -92,7 +92,12 @@ fn create_chat(stream: &mut TcpStream, curr_dest: &mut Destination, args: &str) 
 }
 
 // add/remove member(s) within the current chat
-fn edit_chat_membership(stream: &mut TcpStream, curr_dest: &Destination, args: &str, remove: bool) {
+fn edit_chat_membership(
+    stream: &mut TcpStream,
+    curr_dest: &Destination,
+    args: &str,
+    addrem: MemberDiff,
+) {
     match curr_dest {
         Destination::Client(_) => eprintln!("cannot add/remove members from direct message"),
 
@@ -109,7 +114,7 @@ fn edit_chat_membership(stream: &mut TcpStream, curr_dest: &Destination, args: &
 
                     Ok(members) => {
                         if let Err(e) = (Message::ModifyChatMembers {
-                            remove,
+                            addrem,
                             chat: chat.clone(),
                             members,
                         })
@@ -205,8 +210,8 @@ fn run_command(
     match cmd {
         "chat" => switch_chat(stream, curr_dest, args),
         "chat.new" => create_chat(stream, curr_dest, args),
-        "chat.add" => edit_chat_membership(stream, curr_dest, args, false),
-        "chat.rem" => edit_chat_membership(stream, curr_dest, args, true),
+        "chat.add" => edit_chat_membership(stream, curr_dest, args, MemberDiff::Add),
+        "chat.rem" => edit_chat_membership(stream, curr_dest, args, MemberDiff::Remove),
         "save" => save_attachment(message_history, args),
         "iam" => log_in(stream, args),
         "atch" => attach_to_message(incomplete_message, args),

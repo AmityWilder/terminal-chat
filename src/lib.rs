@@ -444,6 +444,12 @@ impl<'a> TempBlockingTkn<'a> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MemberDiff {
+    Add,
+    Remove,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Message {
     Acknowledge,
@@ -466,9 +472,7 @@ pub enum Message {
     },
     GetResponse(Vec<UserMessage>),
     ModifyChatMembers {
-        /// false: add
-        /// true: remove
-        remove: bool,
+        addrem: MemberDiff,
         chat: ChatName,
         members: BTreeSet<Identifier>,
     },

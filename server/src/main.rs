@@ -252,15 +252,14 @@ fn route_message(
         }
 
         Message::ModifyChatMembers {
-            remove,
+            addrem,
             chat,
             mut members,
         } => match chats.get_mut(&chat) {
             Some(chat) => {
-                if remove {
-                    chat.members = &chat.members - &members; // set difference
-                } else {
-                    chat.members.append(&mut members); // set union
+                match addrem {
+                    MemberDiff::Add => chat.members.append(&mut members), // set union
+                    MemberDiff::Remove => chat.members = &chat.members - &members, // set difference
                 }
             }
 
