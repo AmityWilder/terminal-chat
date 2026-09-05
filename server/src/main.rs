@@ -1,5 +1,6 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
+use chrono::Utc;
 use clap::Parser;
 use std::{
     collections::{BTreeSet, HashMap, hash_map::Entry},
@@ -82,6 +83,7 @@ fn route_message(
 ) {
     match msg {
         Message::User(mut umsg) => {
+            umsg.timestamp = Utc::now();
             response!((Message::Acknowledge) -> &mut clients[sender_index].socket);
             umsg.sender = Some(clients[sender_index].identifier());
             // sanitization

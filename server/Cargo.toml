@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 clap = { workspace = true, features = ["derive"] }
 terminal-chat = { workspace = true }
+chrono = { workspace = true }
