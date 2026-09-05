@@ -1,5 +1,6 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
+use clap::Parser;
 use std::{
     collections::{BTreeSet, HashMap, hash_map::Entry},
     io,
@@ -276,14 +277,16 @@ struct Chat {
     pub messages: MessageHistory,
 }
 
+#[derive(Parser)]
+struct Cli {
+    #[arg(default_value = "127.0.0.1:8080")]
+    target: SocketAddr,
+}
+
 fn main() {
     let stdin = StdinChannel::new();
 
-    let target: SocketAddr = std::env::args()
-        .nth(1)
-        .expect("missing address argument")
-        .parse()
-        .expect("invalid address format");
+    let Cli { target } = Cli::parse();
     let listener = TcpListener::bind(target).expect("failed to create server");
     println!("hosting on {target} ({})", listener.local_addr().unwrap());
     listener

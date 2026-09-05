@@ -10,6 +10,7 @@
 
 #![warn(clippy::undocumented_unsafe_blocks)]
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
@@ -18,11 +19,7 @@ use std::{
     path::Path,
     sync::mpsc::{self, Receiver},
     thread::{self, JoinHandle},
-    time::SystemTime,
 };
-
-mod ameon;
-use ameon::{AmeonDe, AmeonSer};
 
 pub const ADDRESS: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
 
@@ -64,7 +61,7 @@ impl Attachment {
 }
 
 /// A message sent by a user containing text and/or files.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct UserMessage {
     /// Server will use [`None`] to indicate "sent by server".
     /// Server will overwrite with client's actual address.
@@ -78,7 +75,7 @@ pub struct UserMessage {
 
     /// The server will always replace this value with the time *it* received the message.
     /// Clients can be tampered with and are not trusted to make claims about baseline reality.
-    pub timestamp: SystemTime,
+    pub timestamp: DateTime<Utc>,
 
     /// The text content of the message
     pub text: String,
@@ -87,24 +84,12 @@ pub struct UserMessage {
     pub attachments: Vec<Attachment>,
 }
 
-impl Default for UserMessage {
-    fn default() -> Self {
-        Self {
-            sender: Default::default(),
-            destination: Default::default(),
-            timestamp: SystemTime::now(),
-            text: Default::default(),
-            attachments: Default::default(),
-        }
-    }
-}
-
 impl UserMessage {
     pub fn new(destination: Destination, text: String, attachments: Vec<Attachment>) -> Self {
         Self {
             sender: None,
             destination,
-            timestamp: SystemTime::now(),
+            timestamp: Utc::now(),
             text,
             attachments,
         }
@@ -492,8 +477,7 @@ impl Message {
 
     pub fn send(&self, socket: &mut TcpStream) -> io::Result<()> {
         // write the message to a buffer in case there are errors
-        let mut buf: Vec<u8> = Vec::new();
-        self.write_to(&mut buf)?;
+        let buf = ameon::to_bytes(self)?;
 
         // indicate an incoming message
         socket.write_all(&[Self::INCOMING_MESSAGE_CODE])?;
@@ -501,7 +485,13 @@ impl Message {
         // println!("sending {} bytes: {buf:?}", buf.len()); // debug
 
         // send the message through the socket
-        buf.write_to::<_, 8>(socket)
+        socket.write_all(
+            &u64::try_from(buf.len())
+                .map_err(io::Error::other)?
+                .to_be_bytes(),
+        )?;
+        socket.write_all(&buf)?;
+        Ok(())
     }
 
     pub fn recv(socket: &mut TcpStream) -> io::Result<Option<Self>> {
@@ -513,15 +503,28 @@ impl Message {
         }
         assert_eq!(byte, Self::INCOMING_MESSAGE_CODE, "desynchronized");
 
-        let buf: Vec<u8> = {
+        let buf = {
             // read the entire message into a buffer, so we don't get desynced if there are errors
-            Vec::read_from::<_, 8>(&mut *TempBlockingTkn::begin(socket)?)?
+            let mut socket = TempBlockingTkn::begin(socket)?;
+            let mut len_buf = [0; _];
+            socket.read_exact(&mut len_buf)?;
+            let len = u64::from_be_bytes(len_buf);
+            let mut socket = (&mut *socket).take(len);
+            let len = usize::try_from(len).map_err(io::Error::other)?;
+            let mut buf = Vec::with_capacity(len);
+            socket.read_to_end(&mut buf)?;
+            if buf.len() != len {
+                Err(ameon::Error::READ_EXACT_EOF)?;
+            }
+            buf
         }; // TempBlockingTkn goes out of scope and ends blocking
 
         // println!("received {} bytes: {buf:?}", buf.len()); // debug
 
         // reinterpret the buffer as a Message
-        Self::read_from(&mut buf.as_slice()).map(Some)
+        ameon::from_bytes(buf.as_slice())
+            .map_err(Into::into)
+            .map(Some)
     }
 }
 
@@ -582,5 +585,41 @@ impl StdinChannel {
                 })
                 .expect("failed to spawn thread"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_message() -> ameon::Result<()> {
+        for item in [
+            Message::Acknowledge,
+            Message::Success,
+            Message::Error(MessageError::DstNexists),
+            Message::User(UserMessage::new(
+                Destination::Client(Identifier::Socket("127.0.0.1:5555".parse().unwrap())),
+                "hello".to_string(),
+                Vec::new(),
+            )),
+            Message::User(UserMessage::new(
+                Destination::Client(Identifier::Socket("10.0.0.5:8080".parse().unwrap())),
+                "hi!".to_string(),
+                vec![Attachment {
+                    filename: "test.txt".to_string(),
+                    alt_text: "example".to_string(),
+                    data: b"rhgu234ifghqw a9fdh1398 y3rbg9779q842gyb89re8iyuwsda".to_vec(),
+                }],
+            )),
+        ] {
+            println!("---\n{item:#?}");
+            let bytes = ameon::to_bytes(&item)?;
+            println!("{bytes:?}");
+            let message: Message = ameon::from_bytes(&bytes)?;
+            println!("{message:?}");
+            assert_eq!(message, item);
+        }
+        Ok(())
     }
 }

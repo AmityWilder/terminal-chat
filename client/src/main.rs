@@ -1,11 +1,12 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
+use clap::Parser;
 use std::{
     io::{self, Write},
     net::{SocketAddr, TcpStream},
     path::Path,
     sync::mpsc,
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 use terminal_chat::*;
 
@@ -26,12 +27,11 @@ fn display_message(msg: &UserMessage) {
             print!("\x1b[94m{chat}");
         }
     }
-    print!("\x1b[90m at ");
-    match msg.timestamp.duration_since(SystemTime::UNIX_EPOCH) {
-        Ok(dur) => print!("{}ms since unix epoch", dur.as_millis()),
-        Err(e) => print!("\x1b[91m{e}"),
-    }
-    println!("\x1b[90m:\x1b[0m\n{}", msg.text);
+    println!(
+        "\x1b[90m at {}\x1b[90m:\x1b[0m\n{}",
+        msg.timestamp.naive_local(),
+        msg.text
+    );
     if !msg.attachments.is_empty() {
         println!("\x1b[90mattachments:\x1b[94m");
         for attachment in &msg.attachments {
@@ -215,14 +215,16 @@ fn run_command(
     }
 }
 
+#[derive(Parser)]
+struct StartupCli {
+    #[arg(default_value = "127.0.0.1:8080")]
+    target: SocketAddr,
+}
+
 fn main() {
     let stdin = StdinChannel::new();
 
-    let target: SocketAddr = std::env::args()
-        .nth(1)
-        .expect("missing address argument")
-        .parse()
-        .expect("invalid address format");
+    let StartupCli { target } = StartupCli::parse();
     println!("connecting to {target}...");
     let mut stream =
         TcpStream::connect_timeout(&target, Duration::from_secs(2)).expect("failed to connect");
@@ -258,9 +260,11 @@ fn main() {
                         }
                     } else {
                         let next_line = text.as_str().trim_end();
-                        let upcoming_len = next_line.len() + '\n'.len_utf8();
-                        incomplete_message.text.reserve(upcoming_len);
-                        incomplete_message.text.push('\n');
+                        if !incomplete_message.text.is_empty() {
+                            let upcoming_len = next_line.len() + '\n'.len_utf8();
+                            incomplete_message.text.reserve(upcoming_len);
+                            incomplete_message.text.push('\n');
+                        }
                         incomplete_message.text.push_str(next_line);
                     }
                 }

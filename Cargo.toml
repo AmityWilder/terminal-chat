@@ -1,10 +1,19 @@
 [workspace]
-members = ["client", "server"]
+members = ["ameon", "client", "server"]
 
 [package]
 name = "terminal-chat"
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+[workspace.dependencies]
+clap = { version = "4.6.6", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.20"
+terminal-chat = { path = "." }
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+ameon = { path = "./ameon" }
+chrono = { version = "0.4.45", features = ["serde"] }
