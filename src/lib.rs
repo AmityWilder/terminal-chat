@@ -98,36 +98,29 @@ impl UserMessage {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(thiserror::Error, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageError {
+    #[error("nonexistent destination; chat is undefined or recipient is unrecognized")]
     DstNexists,
+
+    #[error("a chat with that name already exists, you do not have permission to overwrite it")]
     ChatTaken,
+
+    #[error("incorrect password, try again")]
     WrongPassword,
-    BadUsername,
+
+    #[error("invalid username: {0}")]
+    BadUsername(#[source] ParseUsernameError),
+
+    #[error("invalid chat name: {0}")]
+    BadChatName(#[source] ParseChatNameError),
+
+    #[error("cannot send messages to yourself")]
     SelfSend,
+
+    #[error("requested message(s) that do(es) not exist")]
     MsgNexists,
 }
-
-impl std::fmt::Display for MessageError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::DstNexists => write!(
-                f,
-                "nonexistent destination; chat is undefined or recipient is unrecognized"
-            ),
-            Self::ChatTaken => write!(
-                f,
-                "a chat with that name already exists, you do not have permission to overwrite it"
-            ),
-            Self::WrongPassword => write!(f, "incorrect password, try again"),
-            Self::BadUsername => write!(f, "usernames may only contain a-z, A-Z, 0-9, and _"),
-            Self::SelfSend => write!(f, "cannot send messages to yourself"),
-            Self::MsgNexists => write!(f, "requested message(s) that do(es) not exist"),
-        }
-    }
-}
-
-impl std::error::Error for MessageError {}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
 pub struct ChatName(String);
@@ -144,7 +137,7 @@ impl ChatName {
     /// Truncate and convert illegal symbols, like spaces into underscores.
     /// This isn't built into the parsing methods because the user should have a chance to confirm after the name is sanitized,
     /// in case it truncates "`assets`" -> "`ass`" or converts "`f𝓻𝓲𝓮𝓷𝓭𝓼`" -> "`f______`"
-    pub fn sanitize(s: &str) -> String {
+    pub fn sanitize(s: &str) -> Self {
         let mut res = s
             .trim_start_matches(|ch: char| !ch.is_ascii_lowercase() || ch.is_whitespace())
             .trim()
@@ -154,17 +147,17 @@ impl ChatName {
             Self::is_valid(&res).is_ok(),
             "sanitization should produce valid names"
         );
-        res
+        Self(res)
     }
 
     /// Test if a candidate name is allowed, returning the error preventing validity if it isn't
     pub fn is_valid(s: &str) -> Result<(), ParseChatNameError> {
         if s.len() > Self::MAX_BYTES {
-            Err(ParseChatNameError::TooLong)
+            Err(ParseChatNameError::TooLong(Self::sanitize(s)))
         } else if !s.starts_with(|ch: char| ch.is_ascii_lowercase())
             || s.contains(|ch: char| !matches!(ch, 'a'..='z' | '0'..='9' | '-'))
         {
-            Err(ParseChatNameError::BadChar)
+            Err(ParseChatNameError::BadChar(Self::sanitize(s)))
         } else {
             Ok(())
         }
@@ -179,29 +172,14 @@ impl std::ops::Deref for ChatName {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(thiserror::Error, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParseChatNameError {
-    BadChar,
-    TooLong,
-}
+    #[error("chat names may only contain a-z, 0-9, or -, and must start with a letter. suggested: {}", .0)]
+    BadChar(ChatName),
 
-impl std::fmt::Display for ParseChatNameError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::BadChar => write!(
-                f,
-                "chat names may only contain a-z, 0-9, or -, and must start with a letter"
-            ),
-            Self::TooLong => write!(
-                f,
-                "chat names have a maximum length of {}",
-                ChatName::MAX_BYTES
-            ),
-        }
-    }
+    #[error("chat names have a maximum length of {}. suggested: {}", ChatName::MAX_BYTES, .0)]
+    TooLong(ChatName),
 }
-
-impl std::error::Error for ParseChatNameError {}
 
 impl TryFrom<String> for ChatName {
     type Error = ParseChatNameError;
@@ -234,7 +212,7 @@ impl Username {
     /// Truncate and convert illegal symbols, like spaces into underscores.
     /// This isn't built into the parsing methods because the user should have a chance to confirm after the name is sanitized,
     /// in case it truncates "`assets`" -> "`ass`" or converts "`f𝓻𝓲𝓮𝓷𝓭𝓼`" -> "`f______`"
-    pub fn sanitize(s: &str) -> String {
+    pub fn sanitize(s: &str) -> Self {
         let mut res = s
             .trim_start_matches(|ch: char| ch.is_ascii_digit() || ch.is_whitespace())
             .trim()
@@ -244,17 +222,17 @@ impl Username {
             Self::is_valid(&res).is_ok(),
             "sanitization should produce valid names"
         );
-        res
+        Self(res)
     }
 
     /// Test if a candidate name is allowed, returning the error preventing validity if it isn't
-    pub fn is_valid(s: &str) -> Result<(), ParseUserNameError> {
+    pub fn is_valid(s: &str) -> Result<(), ParseUsernameError> {
         if s.len() > Self::MAX_BYTES {
-            Err(ParseUserNameError::TooLong)
+            Err(ParseUsernameError::TooLong(Self::sanitize(s)))
         } else if s.starts_with(|ch: char| ch.is_ascii_digit())
             || s.contains(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
         {
-            Err(ParseUserNameError::BadChar)
+            Err(ParseUsernameError::BadChar(Self::sanitize(s)))
         } else {
             Ok(())
         }
@@ -269,32 +247,17 @@ impl std::ops::Deref for Username {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ParseUserNameError {
-    BadChar,
-    TooLong,
-}
+#[derive(thiserror::Error, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ParseUsernameError {
+    #[error("usernames may only contain a-z, A-Z, 0-9, or _, and cannot start with a number. suggested: {}", .0)]
+    BadChar(Username),
 
-impl std::fmt::Display for ParseUserNameError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::BadChar => write!(
-                f,
-                "usernames may only contain a-z, A-Z, 0-9, or _, and cannot start with a number"
-            ),
-            Self::TooLong => write!(
-                f,
-                "usernames have a maximum length of {}",
-                Username::MAX_BYTES
-            ),
-        }
-    }
+    #[error("usernames have a maximum length of {}. suggested: {}", Username::MAX_BYTES, .0)]
+    TooLong(Username),
 }
-
-impl std::error::Error for ParseUserNameError {}
 
 impl TryFrom<String> for Username {
-    type Error = ParseUserNameError;
+    type Error = ParseUsernameError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         Self::is_valid(value.as_str()).map(|()| Self(value))
@@ -302,7 +265,7 @@ impl TryFrom<String> for Username {
 }
 
 impl std::str::FromStr for Username {
-    type Err = ParseUserNameError;
+    type Err = ParseUsernameError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::is_valid(s).map(|()| Self(s.to_string()))
@@ -335,7 +298,7 @@ impl std::fmt::Display for Identifier {
 #[derive(Debug)]
 pub enum ParseIdentifierError {
     Socket(AddrParseError),
-    Username(ParseUserNameError),
+    Username(ParseUsernameError),
 }
 
 impl std::str::FromStr for Identifier {
@@ -460,7 +423,22 @@ pub enum MemberDiff {
     Remove,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+impl std::str::FromStr for MemberDiff {
+    type Err = io::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "a" | "add" => Ok(Self::Add),
+            "r" | "rem" | "remove" => Ok(Self::Remove),
+
+            _ => Err(io::Error::other(format!(
+                "unknown variant: `{s}`; expected `a`/`add` or `r`/`rem`/`remove`"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Message {
     Acknowledge,
     Success,

@@ -153,38 +153,42 @@ fn route_message(
         Message::Success => println!("success"),
         Message::Error(e) => eprintln!("error: {e}"),
 
-        Message::CreateChat {
-            chat: destination,
-            mut members,
-        } => {
-            println!("creating chat...");
-            match chats.entry(destination.clone()) {
-                Entry::Occupied(_) => {
-                    eprintln!("a chat with this name already exists");
-                    err_response!((MessageError::ChatTaken) -> &mut clients[sender_index].socket);
-                }
-                Entry::Vacant(entry) => {
-                    members.insert(
-                        clients[sender_index]
-                            .username
-                            .as_ref()
-                            .map(|s| Identifier::User(s.clone()))
-                            .unwrap_or(Identifier::Socket(clients[sender_index].addr)),
-                    );
-                    entry.insert(Chat {
-                        members,
-                        messages: Vec::new(),
-                    });
-                    println!("chat created");
-                    response!((Message::Success) -> &mut clients[sender_index].socket);
+        Message::CreateChat { chat, mut members } => {
+            if let Err(e) = ChatName::is_valid(&chat) {
+                // can't trust clients to validate their submissions.
+                println!("invalid chat name");
+                err_response!((MessageError::BadChatName(e)) -> &mut clients[sender_index].socket);
+            } else {
+                println!("creating chat...");
+                match chats.entry(chat.clone()) {
+                    Entry::Occupied(_) => {
+                        eprintln!("a chat with this name already exists");
+                        err_response!((MessageError::ChatTaken) -> &mut clients[sender_index].socket);
+                    }
+                    Entry::Vacant(entry) => {
+                        members.insert(
+                            clients[sender_index]
+                                .username
+                                .as_ref()
+                                .map(|s| Identifier::User(s.clone()))
+                                .unwrap_or(Identifier::Socket(clients[sender_index].addr)),
+                        );
+                        entry.insert(Chat {
+                            members,
+                            messages: Vec::new(),
+                        });
+                        println!("chat created");
+                        response!((Message::Success) -> &mut clients[sender_index].socket);
+                    }
                 }
             }
         }
 
         Message::Login { username, password } => {
-            if username.contains(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_')) {
+            if let Err(e) = Username::is_valid(&username) {
+                // can't trust clients to validate their submissions.
                 println!("invalid username");
-                err_response!((MessageError::BadUsername) -> &mut clients[sender_index].socket);
+                err_response!((MessageError::BadUsername(e)) -> &mut clients[sender_index].socket);
             } else {
                 match users.entry(username.clone()) {
                     Entry::Occupied(entry) => {

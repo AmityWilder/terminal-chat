@@ -1,4 +1,4 @@
-use clap::{ArgAction, Parser, Subcommand, value_parser};
+use clap::{Parser, Subcommand, value_parser};
 use std::{
     collections::BTreeSet,
     io::{self, Write},
@@ -18,6 +18,55 @@ struct CliArgs<'a> {
     input: &'a str,
 }
 
+#[derive(thiserror::Error, Debug)]
+#[error("unsupported escape: \\{0}")]
+pub struct UnescapeError(char);
+
+/// Convert all `\_` patterns to their other meanings.
+fn unescape(string: &mut String) -> std::result::Result<(), UnescapeError> {
+    let mut escape = None; // indicates the previous character was a '\\' (not preceded by another '\\')
+    let mut s = &string[..];
+    while !s.is_empty() {
+        // state machine
+        for (i, ch) in s.char_indices() {
+            if let Some(escape) = escape.take() {
+                string.replace_range(
+                    escape..i + ch.len_utf8(),
+                    match ch {
+                        '0' => "\0",
+                        't' => "\t",
+                        'r' => "\r",
+                        'n' => "\n",
+                        '\\' => "\\",
+                        '"' => "\"",
+                        '\'' => "\'",
+                        _ => return Err(UnescapeError(ch)),
+                    },
+                );
+                s = &string[i..]; // MISTAKE: dont use the `s` index to edit `string` when `s` has a different start index from `string`!!
+                println!("{i}: {string} ({s})");
+                break;
+            } else if ch == '\\' {
+                escape = Some(i);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod unescape_tests {
+    use super::{UnescapeError, unescape};
+
+    #[test]
+    fn test0() -> Result<(), UnescapeError> {
+        let mut string = r#"i said \"hello\\"\n to him"#.to_string();
+        unescape(&mut string)?;
+        assert_eq!(string, "i said \"hello\\\"\n to him");
+        Ok(())
+    }
+}
+
 impl<'a> CliArgs<'a> {
     const DELIMITERS: [char; 3] = ['"', '\'', '`'];
 
@@ -28,8 +77,18 @@ impl<'a> CliArgs<'a> {
     }
 
     /// Extract a quoted string, not stopping until an unescaped `"` (or end) is reached.
-    /// `"`s are not included in the output, but are removed from the stream. Escaped characters are not converted.
+    /// `"`s are not included in the output, but are removed from the stream.
     /// The associated bool is true if the closing quote is missing.
+    ///
+    /// **Note:** Escaped characters are not converted.
+    ///
+    /// **Reasoning:** windows paths contain unescaped `\`s.
+    /// There are very few cases in which a user would want to use a `"` in a string argument.
+    /// At best, they might want to put a quote in the alt text of an attachment. In that case,
+    /// it can be converted with [`unescape`] when that happens.
+    /// The rest of the time, it isn't worth the extra allocations needed to satisfy
+    /// [`clap`]'s "[`Into<OsString>`]" requirement for arguments.
+    /// Nor is it worth forcing windows users to manually double up every path separator when pasting file paths.
     fn extract_string(&mut self) -> (&'a str, bool) {
         let delim = self
             .input
@@ -40,11 +99,11 @@ impl<'a> CliArgs<'a> {
             Self::DELIMITERS.contains(&delim),
             "extract_string expects a string to include the opening delimiter"
         );
-        let input = &self.input[delim.len_utf8()..]; // skip open delimiter, we have visited it
+        self.input = &self.input[delim.len_utf8()..]; // skip open delimiter, we have visited it
         let mut is_escaped = false; // indicates the previous character was a '\\' (not preceded by another '\\')
         let arg;
         // state machine
-        for (i, ch) in input.char_indices() {
+        for (i, ch) in self.input.char_indices() {
             if !is_escaped && ch == delim {
                 // closing delimiter
                 arg = &self.input[..i];
@@ -104,7 +163,9 @@ pub enum Command {
     CreateChat {
         /// What the chat should be named
         name: ChatName,
+
         /// Who should be in the chat
+        #[arg(num_args = 1..)]
         members: Vec<Identifier>,
     },
 
@@ -115,15 +176,11 @@ pub enum Command {
         #[arg(short, long)]
         chat: Option<ChatName>,
 
-        /// The `members` argument lists members to be added
-        #[arg(short, long, group = "addrem", action = ArgAction::SetTrue)]
-        add: bool,
-
-        /// The `members` argument lists members to be removed
-        #[arg(short, long, group = "addrem", action = ArgAction::SetTrue)]
-        remove: bool,
+        /// Whether the members are being added or removed
+        mode: MemberDiff,
 
         /// Which members to change
+        #[arg(num_args = 1..)]
         members: Vec<Identifier>,
     },
 
@@ -131,7 +188,13 @@ pub enum Command {
     #[command(name = "atch.sav")]
     SaveAttachment {
         /// The index of the attachment to download
-        #[arg(short = 'i', long = "index", group = "source", required_unless_present = "filename", value_parser = value_parser!(u8).range(0..MAX_ATTACHMENTS as i64))]
+        #[arg(
+            short = 'i',
+            long = "index",
+            group = "source",
+            required_unless_present = "filename",
+            value_parser = value_parser!(u8).range(0..MAX_ATTACHMENTS as i64)
+        )]
         file_index: Option<u8>,
 
         /// The filename of the attachment to download
@@ -342,19 +405,14 @@ impl Command {
 
             Command::ModifyChat {
                 chat,
-                add,
-                remove,
+                mode,
                 members,
             } => edit_chat_membership(
                 stream,
                 curr_dest,
                 chat.as_ref(),
                 BTreeSet::from_iter(members),
-                match (add, remove) {
-                    (true, false) | (false, false) => MemberDiff::Add, // default
-                    (false, true) => MemberDiff::Remove,
-                    (true, true) => unreachable!("clap 'group' option should reject this"),
-                },
+                mode,
             ),
 
             Command::SaveAttachment {
