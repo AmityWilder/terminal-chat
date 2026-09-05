@@ -410,6 +410,16 @@ impl std::str::FromStr for Destination {
     }
 }
 
+impl std::fmt::Display for Destination {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Chat(chat) => write!(f, "#{chat}"),
+            Self::Client(Identifier::User(name)) => write!(f, "@{name}"),
+            Self::Client(Identifier::Socket(addr)) => write!(f, "{addr}"),
+        }
+    }
+}
+
 /// Switches a TcpStream to blocking upon creation.
 /// Resets it to non-blocking when dropped.
 /// This way, even if there's an unexpected early return (like an error), the stream will reset to non-blocking.
@@ -457,7 +467,7 @@ pub enum Message {
     Error(MessageError),
     User(UserMessage),
     CreateChat {
-        destination: ChatName,
+        chat: ChatName,
         members: BTreeSet<Identifier>,
     },
     Login {

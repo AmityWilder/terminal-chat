@@ -154,7 +154,7 @@ fn route_message(
         Message::Error(e) => eprintln!("error: {e}"),
 
         Message::CreateChat {
-            destination,
+            chat: destination,
             mut members,
         } => {
             println!("creating chat...");
