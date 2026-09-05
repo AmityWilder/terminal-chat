@@ -11,6 +11,8 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 use chrono::{DateTime, Utc};
+use deflate::deflate_bytes;
+use inflate::inflate_bytes;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
@@ -477,7 +479,9 @@ impl Message {
 
     pub fn send(&self, socket: &mut TcpStream) -> io::Result<()> {
         // write the message to a buffer in case there are errors
-        let buf = ameon::to_bytes(self)?;
+        let bytes = ameon::to_bytes(self)?;
+        // compress
+        let buf = deflate_bytes(&bytes);
 
         // indicate an incoming message
         socket.write_all(&[Self::INCOMING_MESSAGE_CODE])?;
@@ -488,7 +492,7 @@ impl Message {
         socket.write_all(
             &u64::try_from(buf.len())
                 .map_err(io::Error::other)?
-                .to_be_bytes(),
+                .to_le_bytes(),
         )?;
         socket.write_all(&buf)?;
         Ok(())
@@ -508,7 +512,7 @@ impl Message {
             let mut socket = TempBlockingTkn::begin(socket)?;
             let mut len_buf = [0; _];
             socket.read_exact(&mut len_buf)?;
-            let len = u64::from_be_bytes(len_buf);
+            let len = u64::from_le_bytes(len_buf);
             let mut socket = (&mut *socket).take(len);
             let len = usize::try_from(len).map_err(io::Error::other)?;
             let mut buf = Vec::with_capacity(len);
@@ -521,10 +525,10 @@ impl Message {
 
         // println!("received {} bytes: {buf:?}", buf.len()); // debug
 
+        // decompress
+        let bytes = inflate_bytes(&buf).map_err(io::Error::other)?;
         // reinterpret the buffer as a Message
-        ameon::from_bytes(buf.as_slice())
-            .map_err(Into::into)
-            .map(Some)
+        ameon::from_bytes(&bytes).map_err(Into::into).map(Some)
     }
 }
 

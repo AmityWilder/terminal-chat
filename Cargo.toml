@@ -18,3 +18,5 @@ serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 ameon = { path = "./ameon" }
 chrono = { workspace = true, features = ["serde"] }
+deflate = "1.0.0"
+inflate = "0.4.5"

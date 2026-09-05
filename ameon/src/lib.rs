@@ -1,4 +1,5 @@
 //! Ame (Amy) Object Notation
+//! Serialization/Deserialization library for essentially direct binary representations of data.
 
 #![feature(io_const_error)]
 #![warn(clippy::undocumented_unsafe_blocks)]
