@@ -1,3 +1,4 @@
+use crate::string::{UnescapeError, unescape};
 use clap::{Parser, Subcommand, value_parser};
 use std::{
     collections::BTreeSet,
@@ -16,55 +17,6 @@ struct LiveCli {
 #[derive(Debug, Clone)]
 struct CliArgs<'a> {
     input: &'a str,
-}
-
-#[derive(thiserror::Error, Debug)]
-#[error("unsupported escape: \\{0}")]
-pub struct UnescapeError(char);
-
-/// Convert all `\_` patterns to their other meanings.
-fn unescape(string: &mut String) -> std::result::Result<(), UnescapeError> {
-    let mut escape = None; // indicates the previous character was a '\\' (not preceded by another '\\')
-    let mut s = &string[..];
-    while !s.is_empty() {
-        // state machine
-        for (i, ch) in s.char_indices() {
-            if let Some(escape) = escape.take() {
-                string.replace_range(
-                    escape..i + ch.len_utf8(),
-                    match ch {
-                        '0' => "\0",
-                        't' => "\t",
-                        'r' => "\r",
-                        'n' => "\n",
-                        '\\' => "\\",
-                        '"' => "\"",
-                        '\'' => "\'",
-                        _ => return Err(UnescapeError(ch)),
-                    },
-                );
-                s = &string[i..]; // MISTAKE: dont use the `s` index to edit `string` when `s` has a different start index from `string`!!
-                println!("{i}: {string} ({s})");
-                break;
-            } else if ch == '\\' {
-                escape = Some(i);
-            }
-        }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod unescape_tests {
-    use super::{UnescapeError, unescape};
-
-    #[test]
-    fn test0() -> Result<(), UnescapeError> {
-        let mut string = r#"i said \"hello\\"\n to him"#.to_string();
-        unescape(&mut string)?;
-        assert_eq!(string, "i said \"hello\\\"\n to him");
-        Ok(())
-    }
 }
 
 impl<'a> CliArgs<'a> {
@@ -260,6 +212,9 @@ pub enum Error {
         path: PathBuf,
     },
 
+    #[error("invalid string content: {0}")]
+    Unescape(#[from] UnescapeError),
+
     #[error("invalid attachment: {0}")]
     InvalidAttachment(#[source] io::Error),
 
@@ -428,7 +383,8 @@ impl Command {
 
             Command::Login { username, password } => log_in(stream, username, password),
 
-            Command::Attach { alt_text, file } => {
+            Command::Attach { mut alt_text, file } => {
+                unescape(&mut alt_text)?;
                 attach_to_message(incomplete_message, alt_text, file)
             }
         }

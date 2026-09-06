@@ -1,6 +1,7 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 use clap::Parser;
+use commands::Command;
 use std::{
     io,
     net::{SocketAddr, TcpStream},
@@ -10,7 +11,7 @@ use std::{
 use terminal_chat::*;
 
 mod commands;
-use crate::commands::Command;
+mod string;
 
 fn display_message(msg: &UserMessage) {
     print!("\x1b[90mfrom ");
