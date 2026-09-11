@@ -12,37 +12,22 @@ pub enum UnescapeError {
     TrailingEsc,
 }
 
-pub fn has_escape(s: &str) -> bool {
-    s.contains('\\')
-}
-
-pub fn count_escapes(s: &str) -> usize {
-    let mut num_escapes = 0;
-    let mut is_esc = false;
-    for ch in s.chars() {
-        is_esc = !is_esc && ch == '\\';
-        // no special case for hex escapes needed, we're just counting the number of unescaped '\'s.
-        num_escapes += is_esc as usize;
-    }
-    num_escapes
-}
-
 fn unescape_char(start: usize, ch: char) -> Result<(usize, char), UnescapeError> {
     Ok((
         start + ch.len_utf8(),
         match ch {
             '0'..='9' => char::from(ch as u8 - b'0'),
 
-            'a' => '\x07',
-            'b' => '\x08',
-            'f' => '\x0C',
-            'n' => '\n',
-            'r' => '\r',
-            't' => '\t',
-            'v' => '\x0B',
-            '\\' => '\\',
-            '"' => '\"',
-            '\'' => '\'',
+            'a' => '\x07', // bell
+            'b' => '\x08', // backspace
+            'f' => '\x0C', // form feed
+            'n' => '\n',   // newline
+            'r' => '\r',   // carriage return
+            't' => '\t',   // tab
+            'v' => '\x0B', // vertical tab
+
+            // character literal (remove prefix backslash)
+            '\\' | '"' | '\'' | '`' => ch,
 
             _ => return Err(UnescapeError::BadEsc(ch)),
         },
@@ -63,7 +48,7 @@ impl<'a> Escapes<'a> {
         }
     }
 
-    fn count_escapes(&self) -> usize {
+    pub fn count_escapes(&self) -> usize {
         let mut num_escapes = 0;
         let mut is_esc = false;
         for (_, ch) in self.it.clone() {
@@ -75,14 +60,15 @@ impl<'a> Escapes<'a> {
     }
 
     fn extract_hex(&mut self) -> Result<(usize, char), UnescapeError> {
-        if let Some((
-            (k, '0'..='9' | 'A'..='F' | 'a'..='f'),
-            (_, '0'..='9' | 'A'..='F' | 'a'..='f'),
-        )) = self.it.next().zip(self.it.next())
+        const COUNT: usize = 2;
+        let mut it = self.it.by_ref().peekable();
+        if let Some(&(start, _)) = it.peek()
+            && (0..COUNT).all(|_| self.it.next().is_some_and(|(_, ch)| ch.is_ascii_hexdigit()))
         {
-            let end = k + 2; // ascii chars are 1 byte each
+            let end = start + COUNT; // ascii chars are 1 byte each
             let value = char::from(
-                u8::from_str_radix(&self.s[k..end], 16).expect("should be guarded by condition"),
+                u8::from_str_radix(&self.s[start..end], 16)
+                    .expect("should be guarded by condition"),
             );
             Ok((end, value))
         } else {
@@ -91,12 +77,18 @@ impl<'a> Escapes<'a> {
     }
 
     fn extract_oct(&mut self) -> Result<(usize, char), UnescapeError> {
-        if let Some((((k, '0'..='7'), (_, '0'..='7')), (_, '0'..='7'))) =
-            self.it.next().zip(self.it.next()).zip(self.it.next())
+        const COUNT: usize = 3;
+        let mut it = self.it.by_ref().peekable();
+        if let Some(&(start, _)) = it.peek()
+            && (0..COUNT).all(|_| {
+                self.it
+                    .next()
+                    .is_some_and(|(_, ch)| matches!(ch, '0'..='7'))
+            })
         {
-            let end = k + 3; // ascii chars are 1 byte each
+            let end = start + COUNT; // ascii chars are 1 byte each
             let value = char::from(
-                u8::from_str_radix(&self.s[k..end], 8).expect("should be guarded by condition"),
+                u8::from_str_radix(&self.s[start..end], 8).expect("should be guarded by condition"),
             );
             Ok((end, value))
         } else {
@@ -105,32 +97,18 @@ impl<'a> Escapes<'a> {
     }
 
     fn extract_bin(&mut self) -> Result<(usize, char), UnescapeError> {
-        if let Some((
-            (
-                (
-                    (
-                        ((((k, '0' | '1'), (_, '0' | '1')), (_, '0' | '1')), (_, '0' | '1')),
-                        (_, '0' | '1'),
-                    ),
-                    (_, '0' | '1'),
-                ),
-                (_, '0' | '1'),
-            ),
-            (_, '0' | '1'),
-        )) = self
-            .it
-            .next()
-            .zip(self.it.next())
-            .zip(self.it.next())
-            .zip(self.it.next())
-            .zip(self.it.next())
-            .zip(self.it.next())
-            .zip(self.it.next())
-            .zip(self.it.next())
+        const COUNT: usize = 8;
+        let mut it = self.it.by_ref().peekable();
+        if let Some(&(start, _)) = it.peek()
+            && (0..COUNT).all(|_| {
+                self.it
+                    .next()
+                    .is_some_and(|(_, ch)| matches!(ch, '0'..='1'))
+            })
         {
-            let end = k + 8; // ascii chars are 1 byte each
+            let end = start + COUNT; // ascii chars are 1 byte each
             let value = char::from(
-                u8::from_str_radix(&self.s[k..end], 2).expect("should be guarded by condition"),
+                u8::from_str_radix(&self.s[start..end], 2).expect("should be guarded by condition"),
             );
             Ok((end, value))
         } else {
@@ -173,7 +151,7 @@ pub fn get_escapes(s: &str) -> Result<Vec<(std::ops::Range<usize>, char)>, Unesc
     Escapes::new(s).collect()
 }
 
-/// Convert all `\_` patterns to their other meanings.
+/// Convert all escape sequnces to their other meanings in-place.
 pub fn unescape(string: &mut String) -> Result<(), UnescapeError> {
     // run in reverse so indices don't get invalidated
     for (range, repl) in get_escapes(string)?.into_iter().rev() {
@@ -182,8 +160,11 @@ pub fn unescape(string: &mut String) -> Result<(), UnescapeError> {
     Ok(())
 }
 
+/// Create a new string with all escape sequences converted to their other meanings.
+/// No allocation will occur if there are no escapes.
+#[allow(dead_code, reason = "in case needed later")]
 pub fn to_unescaped(s: &str) -> Result<Cow<'_, str>, UnescapeError> {
-    if has_escape(s) {
+    if s.contains('\\') {
         let mut string = s.to_string();
         unescape(&mut string)?;
         Ok(Cow::Owned(string))
