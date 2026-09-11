@@ -211,6 +211,21 @@ pub enum Command {
         password: String,
     },
 
+    /// Add or list users on your friends list
+    #[command(name = "ikno")]
+    AddFriends {
+        /// The users to add to your friends list (leave empty to list existing friends)
+        users: Vec<Identifier>,
+    },
+
+    /// Remove users from your friends list
+    #[command(name = "ih8")]
+    RemoveFriends {
+        /// The users to remove from your friends list
+        #[arg(num_args = 1..)]
+        users: Vec<Identifier>,
+    },
+
     /// Close the client
     #[command(name = "exit")]
     Exit,
@@ -376,6 +391,7 @@ impl Command {
     pub fn run(
         stream: &mut TcpStream,
         curr_dest: &mut Destination,
+        friends_list: &mut BTreeSet<Identifier>,
         incomplete_message: &mut UserMessage,
         message_history: &[UserMessage],
         input: &str,
@@ -440,6 +456,43 @@ impl Command {
             }
 
             Command::Login { username, password } => log_in(stream, username, password),
+
+            Command::AddFriends { users } => {
+                if users.is_empty() {
+                    if friends_list.is_empty() {
+                        println!("\x1b[90myour friends list is empty\x1b[0m");
+                    } else {
+                        println!("\x1b[90mcurrent friends:\x1b[0m");
+                        for friend in friends_list.iter() {
+                            println!("- \x1b[94m{friend}\x1b[0m");
+                        }
+                    }
+                } else {
+                    let adding = users.len();
+                    let pre_len = friends_list.len();
+                    friends_list.extend(users); // set union
+                    let new = friends_list.len() - pre_len; // .extend() cannot result in a smaller number
+                    let overlap = adding - new; // .extend() cannot add more elements than provided
+                    print!(
+                        "\x1b[90madded {new} new friend{}",
+                        if new == 1 { "" } else { "s" }
+                    );
+
+                    if overlap > 0 {
+                        print!(
+                            " ({overlap} {} already friends)",
+                            if overlap == 1 { "was" } else { "were" }
+                        );
+                    }
+                    println!("\x1b[0m");
+                }
+                Ok(())
+            }
+
+            Command::RemoveFriends { users } => {
+                *friends_list = &*friends_list - &BTreeSet::from_iter(users); // set difference
+                Ok(())
+            }
 
             Command::Cancel { all } => {
                 const LINE_SEP: [char; 2] = ['\n', '\r'];

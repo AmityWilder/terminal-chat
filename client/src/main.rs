@@ -3,6 +3,7 @@
 use clap::Parser;
 use commands::Command;
 use std::{
+    collections::BTreeSet,
     io,
     net::{SocketAddr, TcpStream},
     sync::mpsc,
@@ -71,6 +72,7 @@ fn main() {
         .expect("cannot set nonblocking");
 
     let mut curr_dest = Destination::default();
+    let mut friends_list = BTreeSet::new();
     let mut incomplete_message = UserMessage::default();
     let mut message_history: Vec<UserMessage> = Vec::new();
 
@@ -81,6 +83,7 @@ fn main() {
                     if let Err(e) = Command::run(
                         &mut stream,
                         &mut curr_dest,
+                        &mut friends_list,
                         &mut incomplete_message,
                         &message_history,
                         cmd,
