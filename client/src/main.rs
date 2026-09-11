@@ -12,6 +12,7 @@ use std::{
 use terminal_chat::*;
 
 mod commands;
+mod format;
 mod string;
 
 fn display_message(msg: &UserMessage) {
@@ -32,7 +33,7 @@ fn display_message(msg: &UserMessage) {
         }
     }
     println!(
-        "\x1b[90m at {}\x1b[90m:\x1b[0m\n{}",
+        "\x1b[90m at {}\x1b[90m:\x1b[0m\n{}\x1b[0m",
         msg.timestamp.naive_local(),
         msg.text
     );

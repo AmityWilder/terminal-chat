@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, range::Range};
 
 #[derive(thiserror::Error, Debug)]
 pub enum UnescapeError {
@@ -118,7 +118,7 @@ impl<'a> Escapes<'a> {
 }
 
 impl Iterator for Escapes<'_> {
-    type Item = Result<(std::ops::Range<usize>, char), UnescapeError>;
+    type Item = Result<(Range<usize>, char), UnescapeError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.it.by_ref().find(|(_, ch)| *ch == '\\').map(|(i, _)| {
@@ -132,7 +132,7 @@ impl Iterator for Escapes<'_> {
                         'b' => self.extract_bin(),
                         _ => unescape_char(j, ch),
                     }
-                    .map(|(end, repl)| (i..end, repl))
+                    .map(|(end, repl)| (Range::from(i..end), repl))
                 })
         })
     }
@@ -147,7 +147,7 @@ impl ExactSizeIterator for Escapes<'_> {}
 
 impl std::iter::FusedIterator for Escapes<'_> {}
 
-pub fn get_escapes(s: &str) -> Result<Vec<(std::ops::Range<usize>, char)>, UnescapeError> {
+pub fn get_escapes(s: &str) -> Result<Vec<(Range<usize>, char)>, UnescapeError> {
     Escapes::new(s).collect()
 }
 
