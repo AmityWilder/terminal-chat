@@ -1,5 +1,5 @@
 use crate::string::{UnescapeError, unescape};
-use clap::{Parser, Subcommand, value_parser};
+use clap::{ArgAction, Parser, Subcommand, value_parser};
 use std::{
     collections::BTreeSet,
     io::{self, Write},
@@ -174,6 +174,33 @@ pub enum Command {
         file: PathBuf,
     },
 
+    /// Remove an attachment from the current message
+    #[command(name = "atch.rm")]
+    RemoveAttachment {
+        /// The 0-based index of the attachment to remove
+        #[arg(value_parser = value_parser!(u8).range(0..MAX_ATTACHMENTS as i64))]
+        index: u8,
+    },
+
+    /// Edit the alt text of an attachment on the current message
+    #[command(name = "atch.edit")]
+    EditAttachment {
+        /// The 0-based index of the attachment to edit
+        #[arg(value_parser = value_parser!(u8).range(0..MAX_ATTACHMENTS as i64))]
+        index: u8,
+
+        /// Alt text to replace the current description with
+        alt_text: String,
+    },
+
+    /// Remove one or all lines from the current message (does not remove attachments)
+    #[command(name = "undo")]
+    Cancel {
+        /// Remove the entire message - default: removes only the last line of the message
+        #[arg(short, long, action = ArgAction::Set)]
+        all: bool,
+    },
+
     /// Tell the server what @ other users should use to reach you
     #[command(name = "iam")]
     Login {
@@ -185,7 +212,6 @@ pub enum Command {
     },
 
     /// Close the client
-    // NOTE: THIS DOESN'T ACTUALLY DO ANYTHING! EXIT IS HANDLED ON THE STDIN THREAD
     #[command(name = "exit")]
     Exit,
 }
@@ -375,6 +401,11 @@ impl Command {
                 mode,
             ),
 
+            Command::Attach { mut alt_text, file } => {
+                unescape(&mut alt_text)?;
+                attach_to_message(incomplete_message, alt_text, file)
+            }
+
             Command::SaveAttachment {
                 file_index,
                 filename,
@@ -386,14 +417,47 @@ impl Command {
                 output.as_deref(),
             ),
 
-            Command::Login { username, password } => log_in(stream, username, password),
-
-            Command::Attach { mut alt_text, file } => {
-                unescape(&mut alt_text)?;
-                attach_to_message(incomplete_message, alt_text, file)
+            Command::RemoveAttachment { index } => {
+                if (index as usize) < incomplete_message.attachments.len() {
+                    incomplete_message.attachments.remove(index as usize);
+                    Ok(())
+                } else {
+                    Err(Error::AtchNexists)
+                }
             }
 
-            // See [`StdinChannel`]
+            Command::EditAttachment {
+                index,
+                mut alt_text,
+            } => {
+                if let Some(attachment) = incomplete_message.attachments.get_mut(index as usize) {
+                    unescape(&mut alt_text)?;
+                    attachment.alt_text = alt_text;
+                    Ok(())
+                } else {
+                    Err(Error::AtchNexists)
+                }
+            }
+
+            Command::Login { username, password } => log_in(stream, username, password),
+
+            Command::Cancel { all } => {
+                const LINE_SEP: [char; 2] = ['\n', '\r'];
+                if !all
+                    && let Some(new_end) = incomplete_message.text.rfind(LINE_SEP)
+                    && !matches!(&incomplete_message.text[..new_end], "\r" | "\n")
+                {
+                    incomplete_message.text.truncate(new_end);
+                    if incomplete_message.text.ends_with(LINE_SEP) {
+                        incomplete_message.text.pop();
+                    }
+                } else {
+                    incomplete_message.text.clear();
+                }
+                Ok(())
+            }
+
+            // Implemented in [`interface::StdinChannel`]
             Command::Exit => Ok(()),
         }
     }
