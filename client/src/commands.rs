@@ -183,6 +183,11 @@ pub enum Command {
         /// Your password - if your username isn't currently in use, you will create a new login with this password
         password: String,
     },
+
+    /// Close the client
+    // NOTE: THIS DOESN'T ACTUALLY DO ANYTHING! EXIT IS HANDLED ON THE STDIN THREAD
+    #[command(name = "exit")]
+    Exit,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -387,6 +392,9 @@ impl Command {
                 unescape(&mut alt_text)?;
                 attach_to_message(incomplete_message, alt_text, file)
             }
+
+            // See [`StdinChannel`]
+            Command::Exit => Ok(()),
         }
     }
 }

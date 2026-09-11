@@ -89,5 +89,5 @@ Remember that you can use `/help` for a full list and specifics on how to run th
 
 ### Step 4
 
-To end either a server or client side of the application, type `exit` and press enter. This will tell the program to shutdown cleanly.
+To end either a server or client side of the application, type `/exit` and press enter. This will tell the program to shutdown cleanly.
 You may prefer to do this on the server side, as all connected clients will automatically exit when the server hosting them stops running.

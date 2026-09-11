@@ -564,7 +564,7 @@ impl StdinChannel {
                                 while buffer.ends_with(['\n', '\r']) {
                                     buffer.pop();
                                 }
-                                if buffer.as_str() == "exit" {
+                                if buffer.as_str() == "/exit" {
                                     println!("closing");
                                     break;
                                 }
