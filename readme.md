@@ -54,7 +54,7 @@ By default, your message will be sent to the global chat. All connected clients 
 
 #### Commands
 
-To enter a command: At the start of a new line, press `/`, then enter the name command you want to use, followed by the arguments for the command. To see a list of commands and what they do, enter `/help`.
+To enter a command: At the start of a new line, press `/`, then enter the name of the command you want to use, followed by the arguments for the command. To see a list of commands and what they do, enter `/help`.
 
 Some particularly useful ones are:
 
