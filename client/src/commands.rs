@@ -443,16 +443,17 @@ impl Command {
 
             Command::Cancel { all } => {
                 const LINE_SEP: [char; 2] = ['\n', '\r'];
+                let text = &mut incomplete_message.text;
                 if !all
-                    && let Some(new_end) = incomplete_message.text.rfind(LINE_SEP)
-                    && !matches!(&incomplete_message.text[..new_end], "\r" | "\n")
+                    && let Some(new_end) = text.rfind(LINE_SEP)
+                    && !matches!(&text[..new_end], "\r" | "\n")
                 {
-                    incomplete_message.text.truncate(new_end);
-                    if incomplete_message.text.ends_with(LINE_SEP) {
-                        incomplete_message.text.pop();
+                    text.truncate(new_end);
+                    if text.ends_with(LINE_SEP) {
+                        text.pop();
                     }
                 } else {
-                    incomplete_message.text.clear();
+                    text.clear();
                 }
                 Ok(())
             }
