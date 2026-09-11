@@ -13,7 +13,11 @@ use terminal_chat::*;
 macro_rules! response {
     (($msg:expr) -> $socket:expr) => {{
         let msg: Message = $msg;
-        println!("responding to client with \"{msg:?}\"");
+        if cfg!(debug_assertions) {
+            println!("responding to client with \"{msg:?}\"");
+        } else {
+            println!("responding to client");
+        }
         if let Err(e) = msg.send($socket) {
             eprintln!("failed to send response to client: {e}");
         }
@@ -94,7 +98,11 @@ fn route_message(
                 // global chat
                 Destination::Chat(chat) if chat.is_empty() => {
                     // messages.push(umsg.clone()); // todo: global chat history?
-                    println!("distributing message:\n```\n{umsg:?}\n```");
+                    if cfg!(debug_assertions) {
+                        println!("distributing message:\n```\n{umsg:?}\n```");
+                    } else {
+                        println!("distributing message");
+                    }
                     let msg = Message::User(umsg);
                     for (_, client) in clients
                         .iter_mut()
@@ -119,7 +127,11 @@ fn route_message(
 
                     Some(Chat { members, messages }) => {
                         messages.push(umsg.clone());
-                        println!("distributing message:\n```\n{umsg:?}\n```");
+                        if cfg!(debug_assertions) {
+                            println!("distributing message:\n```\n{umsg:?}\n```");
+                        } else {
+                            println!("distributing message");
+                        }
                         let msg = Message::User(umsg);
                         for member in members.iter() {
                             if clients[sender_index].matches(member) {
@@ -141,7 +153,11 @@ fn route_message(
                         Ok(user_pair) => {
                             let identifier = identifier.clone(); // identifier is a partial borrow of umsg
                             dm_history.entry(user_pair).or_default().push(umsg.clone());
-                            println!("sending direct message message:\n```\n{umsg:?}\n```");
+                            if cfg!(debug_assertions) {
+                                println!("sending direct message message:\n```\n{umsg:?}\n```");
+                            } else {
+                                println!("sending direct message message");
+                            }
                             send_message_to_client(&Message::User(umsg), clients, &identifier)
                         }
                     }
