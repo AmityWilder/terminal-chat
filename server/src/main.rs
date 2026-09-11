@@ -282,8 +282,11 @@ struct Chat {
     pub messages: MessageHistory,
 }
 
+/// Server half of Terminal Chat
 #[derive(Parser)]
+#[command(version)]
 struct Cli {
+    /// The socket address to connect to
     #[arg(default_value = "127.0.0.1:8080")]
     target: SocketAddr,
 }

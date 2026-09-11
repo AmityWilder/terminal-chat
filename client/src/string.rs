@@ -103,6 +103,40 @@ impl<'a> Escapes<'a> {
             Err(UnescapeError::Invalid)
         }
     }
+
+    fn extract_bin(&mut self) -> Result<(usize, char), UnescapeError> {
+        if let Some((
+            (
+                (
+                    (
+                        ((((k, '0' | '1'), (_, '0' | '1')), (_, '0' | '1')), (_, '0' | '1')),
+                        (_, '0' | '1'),
+                    ),
+                    (_, '0' | '1'),
+                ),
+                (_, '0' | '1'),
+            ),
+            (_, '0' | '1'),
+        )) = self
+            .it
+            .next()
+            .zip(self.it.next())
+            .zip(self.it.next())
+            .zip(self.it.next())
+            .zip(self.it.next())
+            .zip(self.it.next())
+            .zip(self.it.next())
+            .zip(self.it.next())
+        {
+            let end = k + 8; // ascii chars are 1 byte each
+            let value = char::from(
+                u8::from_str_radix(&self.s[k..end], 2).expect("should be guarded by condition"),
+            );
+            Ok((end, value))
+        } else {
+            Err(UnescapeError::Invalid)
+        }
+    }
 }
 
 impl Iterator for Escapes<'_> {
@@ -117,6 +151,7 @@ impl Iterator for Escapes<'_> {
                     match ch {
                         'x' => self.extract_hex(),
                         'o' => self.extract_oct(),
+                        'b' => self.extract_bin(),
                         _ => unescape_char(j, ch),
                     }
                     .map(|(end, repl)| (i..end, repl))

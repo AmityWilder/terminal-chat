@@ -44,19 +44,26 @@ fn display_message(msg: &UserMessage) {
     println!("\x1b[90m------\x1b[0m")
 }
 
+/// Client half of Terminal Chat
 #[derive(Parser)]
+#[command(version)]
 struct StartupCli {
+    /// The socket address to connect to
     #[arg(default_value = "127.0.0.1:8080")]
     target: SocketAddr,
+
+    /// Time, in seconds, to wait before giving up on a connection
+    #[arg(short, long, default_value = "2")]
+    timeout: u64,
 }
 
 fn main() {
     let stdin = StdinChannel::new();
 
-    let StartupCli { target } = StartupCli::parse();
+    let StartupCli { target, timeout } = StartupCli::parse();
     println!("connecting to {target}...");
-    let mut stream =
-        TcpStream::connect_timeout(&target, Duration::from_secs(2)).expect("failed to connect");
+    let mut stream = TcpStream::connect_timeout(&target, Duration::from_secs(timeout))
+        .expect("failed to connect");
     println!("connected to {}", stream.peer_addr().unwrap());
 
     stream
