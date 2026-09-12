@@ -1,4 +1,7 @@
-use crate::string::{UnescapeError, unescape};
+use crate::{
+    format::{FormatError, format},
+    string::{UnescapeError, unescape},
+};
 use clap::{ArgAction, Parser, Subcommand, value_parser};
 use std::{
     collections::BTreeSet,
@@ -258,6 +261,9 @@ pub enum Error {
         path: PathBuf,
     },
 
+    #[error("invalid string formatting: {0}")]
+    Format(#[from] FormatError),
+
     #[error("invalid string content: {0}")]
     Unescape(#[from] UnescapeError),
 
@@ -418,6 +424,7 @@ impl Command {
             ),
 
             Command::Attach { mut alt_text, file } => {
+                format(&mut alt_text)?;
                 unescape(&mut alt_text)?;
                 attach_to_message(incomplete_message, alt_text, file)
             }
@@ -447,6 +454,7 @@ impl Command {
                 mut alt_text,
             } => {
                 if let Some(attachment) = incomplete_message.attachments.get_mut(index as usize) {
+                    format(&mut alt_text)?;
                     unescape(&mut alt_text)?;
                     attachment.alt_text = alt_text;
                     Ok(())

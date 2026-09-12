@@ -142,7 +142,11 @@ impl<'a> Iterator for FormatNodes<'a> {
         while let Some((start, ch)) = self.iter.next() {
             match ch {
                 // escape - just skip the next character
-                '\\' => _ = self.iter.next(),
+                '\\' => {
+                    _ = self
+                        .iter
+                        .next_if(|(_, ch)| matches!(ch, '`' | '*' | '_' | '|' | '~'))
+                }
 
                 // code
                 '`' => {
@@ -359,5 +363,20 @@ mod tests {
         let mut s = "apple ```ee `` ee``` banana".to_string();
         format(&mut s).unwrap();
         assert_eq!(&s, "apple ee `` ee banana");
+    }
+
+    #[test]
+    fn test_multiescape() {
+        let mut s = r#"hello **big dylan**! i remember your \x1b[91mred"#.to_string();
+        format(&mut s).unwrap();
+        assert_eq!(
+            &s,
+            "hello \x1b[1mbig dylan\x1b[22m! i remember your \\x1b[91mred"
+        );
+        crate::string::unescape(&mut s).unwrap();
+        assert_eq!(
+            &s,
+            "hello \x1b[1mbig dylan\x1b[22m! i remember your \x1b[91mred"
+        );
     }
 }

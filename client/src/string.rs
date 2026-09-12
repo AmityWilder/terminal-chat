@@ -63,7 +63,7 @@ impl<'a> Escapes<'a> {
         const COUNT: usize = 2;
         let mut it = self.it.by_ref().peekable();
         if let Some(&(start, _)) = it.peek()
-            && (0..COUNT).all(|_| self.it.next().is_some_and(|(_, ch)| ch.is_ascii_hexdigit()))
+            && (0..COUNT).all(|_| it.next().is_some_and(|(_, ch)| ch.is_ascii_hexdigit()))
         {
             let end = start + COUNT; // ascii chars are 1 byte each
             let value = char::from(
@@ -80,11 +80,7 @@ impl<'a> Escapes<'a> {
         const COUNT: usize = 3;
         let mut it = self.it.by_ref().peekable();
         if let Some(&(start, _)) = it.peek()
-            && (0..COUNT).all(|_| {
-                self.it
-                    .next()
-                    .is_some_and(|(_, ch)| matches!(ch, '0'..='7'))
-            })
+            && (0..COUNT).all(|_| it.next().is_some_and(|(_, ch)| matches!(ch, '0'..='7')))
         {
             let end = start + COUNT; // ascii chars are 1 byte each
             let value = char::from(
@@ -100,11 +96,7 @@ impl<'a> Escapes<'a> {
         const COUNT: usize = 8;
         let mut it = self.it.by_ref().peekable();
         if let Some(&(start, _)) = it.peek()
-            && (0..COUNT).all(|_| {
-                self.it
-                    .next()
-                    .is_some_and(|(_, ch)| matches!(ch, '0'..='1'))
-            })
+            && (0..COUNT).all(|_| it.next().is_some_and(|(_, ch)| matches!(ch, '0'..='1')))
         {
             let end = start + COUNT; // ascii chars are 1 byte each
             let value = char::from(

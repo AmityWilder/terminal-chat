@@ -11,6 +11,8 @@ use std::{
 };
 use terminal_chat::*;
 
+use crate::{format::format, string::unescape};
+
 mod commands;
 mod format;
 mod string;
@@ -107,13 +109,21 @@ fn main() {
                             eprintln!("failed to send message: {e}");
                         }
                     } else {
-                        let next_line = text.as_str().trim_end();
-                        if !incomplete_message.text.is_empty() {
-                            let upcoming_len = next_line.len() + '\n'.len_utf8();
-                            incomplete_message.text.reserve(upcoming_len);
-                            incomplete_message.text.push('\n');
+                        let mut next_line = text.as_str().trim_end().to_string();
+                        match format(&mut next_line) {
+                            Ok(()) => match unescape(&mut next_line) {
+                                Ok(()) => {
+                                    if !incomplete_message.text.is_empty() {
+                                        let upcoming_len = next_line.len() + '\n'.len_utf8();
+                                        incomplete_message.text.reserve(upcoming_len);
+                                        incomplete_message.text.push('\n');
+                                    }
+                                    incomplete_message.text.push_str(&next_line);
+                                }
+                                Err(e) => eprintln!("{e}"),
+                            },
+                            Err(e) => eprintln!("{e}"),
                         }
-                        incomplete_message.text.push_str(next_line);
                     }
                 }
             }
