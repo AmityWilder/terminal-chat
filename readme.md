@@ -52,27 +52,45 @@ To send a message: While in a terminal running the client program (after success
 
 By default, your message will be sent to the global chat. All connected clients will receive your message, however it will not be buffered for disconnected clients.
 
+Within a message or attachment description (alt text), text can be formatted and contain escape sequences.
+
+The supported formatting patterns are (dependent on terminal support):
+
+- `*`...`*`: italic
+- `**`...`**`: bold
+- `***`...`***`: bold & italic
+- `__`...`__`: underline
+- `||`...`||`: hidden
+- `~~`...`~~`: strikethrough
+- `` ` ``...`` ` ``: code (inner text is sent without formatting)
+  - \`...\`: normal
+  - \`\`...\`\`: text can contain single graves
+  - \`\`\`...\`\`\`: text can contain double graves
+
+The supported escapes are:
+
+- `\x##` (replace `#` with hexadecimal digits (0-9, a-f, A-F)): the hexadecimal value as a byte
+- `\o###` (replace `#` with octal digits (0-7)): the octal value as a byte
+- `\b########` (replace `#` with binary digits (0-1)): the binary value as a byte
+- `\0`-`\9`: the decimal value as a byte
+- `\a`: bell
+- `\b`: backspace
+- `\f`: form feed
+- `\n`: newline
+- `\r`: return carriage
+- `\t`: tab
+- `\v`: vertical tab
+- `\\`: `\`
+- `\"`: `"`
+- `\'`: `'`
+
 #### Commands
 
 To enter a command: At the start of a new line, press `/`, then enter the name of the command you want to use, followed by the arguments for the command. To see a list of commands and what they do, enter `/help`.
 
 Some particularly useful ones are:
 
-- `/atch.add` - Add an attachment to the current message. Up to 8 attachments can be added. The attachment must be a file on your computer, which you must reference by filesystem path. An attachment can be any file. Attachments may include alt text to describe them. Alt text can be a double-quoted (`"`) string containing escape characers. The supported escapes are:
-  - `\x##` (replace `#` with hexadecimal digits (0-9, a-f, A-F)): the hexadecimal value as a byte
-  - `\o###` (replace `#` with octal digits (0-7)): the octal value as a byte
-  - `\b########` (replace `#` with binary digits (0-1)): the binary value as a byte
-  - `\0`-`\9`: the decimal value as a byte
-  - `\a`: bell
-  - `\b`: backspace
-  - `\f`: form feed
-  - `\n`: newline
-  - `\r`: return carriage
-  - `\t`: tab
-  - `\v`: vertical tab
-  - `\\`: `\`
-  - `\"`: `"`
-  - `\'`: `'`
+- `/atch.add` - Add an attachment to the current message. Up to 8 attachments can be added. The attachment must be a file on your computer, which you must reference by filesystem path. An attachment can be any file. Attachments may include alt text to describe them. Alt text can be a double-quoted (`"`) string containing formatting and escape sequences.
 
 - `/atch.save` - Download an attachment, by filename, from the most recent loaded message.
 
