@@ -92,7 +92,7 @@ Some particularly useful ones are:
 
 - `/atch.add` - Add an attachment to the current message. Up to 8 attachments can be added. The attachment must be a file on your computer, which you must reference by filesystem path. An attachment can be any file. Attachments may include alt text to describe them. Alt text can be a double-quoted (`"`) string containing formatting and escape sequences.
 
-- `/atch.save` - Download an attachment, by filename, from the most recent loaded message.
+- `/atch.sav` - Download an attachment, by filename, from the most recent loaded message.
 
 - `/iam` - Give yourself a username. Usernames have character/length requirements that will be presented if you enter an invalid one. If the name is not in use, you may make up a password. If it *is* in use, you must enter the password that is associated with that username (or choose a different username). The password has no security requirements. User identities will persist as long as the server program is running, but not once it is shut down. Multiple client programs are allowed to use the same username, as long as all of them log in with the same password.
 
